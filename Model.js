@@ -482,13 +482,29 @@ function loadDecision(s) {
   return "debounce"
 }
 
-var KEYRING_ERRORS = ["KEYRING_LOCKED", "KEYRING_UNAVAILABLE", "KEY_NOT_FOUND"]
+var LABEL_SAFE_ERRORS = ["KEYRING_LOCKED", "KEYRING_UNAVAILABLE", "KEY_NOT_FOUND", "ITEM_NOT_FOUND"]
 
-// A keyring failure, or any failure of a single-entry reveal, says nothing
-// about the labels already listed; any other failure may mean the vault itself
-// changed, so nothing stale is kept.
-function keepsLabels(error, request) {
-  return KEYRING_ERRORS.indexOf(error) >= 0 || (!!request && request.revealId !== "")
+// Keyring and single-item failures say nothing about the labels already
+// listed. Any other failure may mean the vault itself changed, and the spec
+// allows no partial data then.
+function keepsLabels(error) {
+  return LABEL_SAFE_ERRORS.indexOf(error) >= 0
+}
+
+// After a check, reload codes on a failed load, a vault change, or a return
+// to READY, unless a codes reply since the last non-READY check (the unlock
+// prompt's) is already current.
+// c: { ready, panelOpen, codesFailed, mtimeChanged, wasReady, codesFresh }
+function reloadAfterCheck(c) {
+  if (!c.ready || !c.panelOpen) return false
+  return c.codesFailed || c.mtimeChanged || (!c.wasReady && !c.codesFresh)
+}
+
+// Privacy mode reveals only a row chosen by keyboard or click: a pointer
+// resting on a row while the screen is shared must not expose its code.
+function revealIdFor(privacy, entry, byPointer) {
+  if (!privacy || !entry || byPointer) return ""
+  return entry.id
 }
 
 // Brand glyphs from the Nerd Font the bar already uses, so issuer icons need
@@ -541,7 +557,7 @@ brand("\uF0E1", ["linkedin"])
 brand("\uF099", ["twitter", "x"])
 brand("\uEDC0", ["mastodon"])
 brand("\uF1E8", ["twitch"])
-brand("\uF1B6", ["steam"])
+brand("\uF1B6", ["steam", "steampowered", "steamcommunity"])
 brand("\uED18", ["playstation", "psn", "playstationnetwork"])
 brand("\u{F07E1}", ["nintendo"])
 brand("\uEF94", ["battlenet", "blizzard"])
@@ -598,9 +614,14 @@ brand("\uF288", ["producthunt"])
 brand("\uF189", ["vk"])
 brand("\u{F0611}", ["wechat"])
 
+// Brand keys that are also common words; they match only the whole issuer,
+// so "Live Nation" or "Steam Plumbing" get no brand.
+var NO_FALLBACK = ["live", "medium", "notion", "steam", "line", "apple", "amazon", "uber", "slack", "signal"]
+
 // "Git Hub", "github.com" and "accounts.google.com" become "github" and
 // "google"; a parenthetical like "(work)" is dropped. The first word is a
-// fallback key, so "Microsoft Account" still finds Microsoft.
+// fallback key, so "Microsoft Account" still finds Microsoft; short and
+// common-word keys are never used as a fallback.
 function issuerKeys(issuer) {
   var s = lower(issuer).replace(/\([^)]*\)/g, " ").trim()
   if (/^[a-z0-9-]+(\.[a-z0-9-]+)+$/.test(s)) {
@@ -610,7 +631,7 @@ function issuerKeys(issuer) {
   var words = s.split(/[^a-z0-9]+/).filter(function(w) { return w !== "" })
   var keys = []
   if (words.length > 0) keys.push(words.join(""))
-  if (words.length > 1) keys.push(words[0])
+  if (words.length > 1 && words[0].length >= 3 && NO_FALLBACK.indexOf(words[0]) < 0) keys.push(words[0])
   return keys
 }
 

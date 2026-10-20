@@ -208,11 +208,32 @@ test("a failed reveal keeps labels, so the selection and request stay put", () =
   assert.equal(M.loadDecision({ trigger: "change", opened: true, status: "READY", last: M.codesRequest(true, "b"), wanted }), "none")
 })
 
-test("keepsLabels after keyring or reveal failures only", () => {
-  assert.equal(M.keepsLabels("KEYRING_LOCKED", M.codesRequest(false, "")), true)
-  assert.equal(M.keepsLabels("DECRYPT_FAILED", M.codesRequest(true, "a")), true)
-  assert.equal(M.keepsLabels("VAULT_FORMAT_CHANGED", M.codesRequest(true, "")), false)
-  assert.equal(M.keepsLabels("HELPER_MISSING", M.codesRequest(false, "")), false)
+test("keepsLabels only after keyring or item-level errors", () => {
+  for (const e of ["KEYRING_LOCKED", "KEYRING_UNAVAILABLE", "KEY_NOT_FOUND", "ITEM_NOT_FOUND"]) assert.equal(M.keepsLabels(e), true, e)
+  for (const e of ["VAULT_FORMAT_CHANGED", "DECRYPT_FAILED", "HELPER_MISSING", "HELPER_OUTDATED", "VAULT_NOT_FOUND", "TIMEOUT", "INTERNAL"])
+    assert.equal(M.keepsLabels(e), false, e)
+})
+
+test("reloadAfterCheck skips the reload right after a successful unlock", () => {
+  const c = (extra) => M.reloadAfterCheck(Object.assign({
+    ready: true, panelOpen: true, codesFailed: false, mtimeChanged: false, wasReady: false, codesFresh: true
+  }, extra || {}))
+  assert.equal(c(), false)
+  assert.equal(c({ codesFresh: false }), true)
+  assert.equal(c({ wasReady: true, codesFresh: false }), false)
+  assert.equal(c({ mtimeChanged: true }), true)
+  assert.equal(c({ codesFailed: true }), true)
+  assert.equal(c({ ready: false, codesFailed: true }), false)
+  assert.equal(c({ panelOpen: false, mtimeChanged: true }), false)
+})
+
+test("revealIdFor ignores pointer selection in privacy mode", () => {
+  const e = { id: "a" }
+  assert.equal(M.revealIdFor(true, e, false), "a")
+  assert.equal(M.revealIdFor(true, e, true), "")
+  assert.equal(M.revealIdFor(false, e, false), "")
+  assert.equal(M.revealIdFor(false, e, true), "")
+  assert.equal(M.revealIdFor(true, null, false), "")
 })
 
 test("issuerGlyph normalizes case, spacing, punctuation and domains", () => {
@@ -238,4 +259,13 @@ test("issuerGlyph returns empty for unknown and prototype-like issuers", () => {
   for (const name of ["Hetzner", "Tailscale", "Proton", "", null, undefined, "constructor", "__proto__", "toString", "hasOwnProperty"])
     assert.equal(M.issuerGlyph(name), "", String(name))
   assert.equal(M.issuerGlyph("Gitea (home) server"), M.issuerGlyph("gitea"))
+})
+
+test("issuerGlyph never falls back to short or common-word keys", () => {
+  for (const name of ["Live Nation", "X-Plane", "X Bank", "Steam Plumbing", "Medium Rare"])
+    assert.equal(M.issuerGlyph(name), "", name)
+  assert.notEqual(M.issuerGlyph("X"), "")
+  assert.equal(M.issuerGlyph("X"), M.issuerGlyph("Twitter"))
+  assert.equal(M.issuerGlyph("Live"), M.issuerGlyph("Microsoft"))
+  assert.equal(M.issuerGlyph("Steam"), M.issuerGlyph("steampowered.com"))
 })

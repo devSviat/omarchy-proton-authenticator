@@ -48,6 +48,9 @@ Item {
   property bool promptRunning: false
   property bool checkRunning: false
   property bool codesRunning: false
+  // A codes call succeeded since the last non-READY check, e.g. the unlock
+  // prompt's, so a return to READY needs no reload.
+  property bool codesFresh: false
   // Unlock pressed while another codes call was running; it runs next.
   property bool unlockQueued: false
   property var queuedRequest: null
@@ -121,8 +124,14 @@ Item {
       else if (root.checkStatus !== "READY") root.clearCodes()
       else root.applyStatus()
       if (reply.ok) root.retryPrefs()
-      if (root.checkStatus === "READY" && root.panelOpen
-          && (codesFailed || !wasReady || root.vaultMtime !== before))
+      if (Model.reloadAfterCheck({
+            ready: root.checkStatus === "READY",
+            panelOpen: root.panelOpen,
+            codesFailed: codesFailed,
+            mtimeChanged: root.vaultMtime !== before,
+            wasReady: wasReady,
+            codesFresh: root.codesFresh
+          }))
         root.loadCodes(root.lastRequest)
     })
   }
@@ -171,6 +180,7 @@ Item {
           // Privacy may have been switched on while a full listing was in flight.
           root.entries = wanted.privateMode ? Model.hideCodes(entries, wanted.revealId) : entries
           root.codesError = ""
+          root.codesFresh = Model.sameRequest(wanted, req)
         } else if (reply.error === "ITEM_NOT_FOUND" && req.revealId !== "") {
           // The revealed entry was deleted; list the rest so a new selection
           // can be revealed.
@@ -179,8 +189,9 @@ Item {
         } else {
           // Labels stay after a keyring or reveal failure, so the list does
           // not empty and move the selection, which would start another reveal.
-          root.entries = Model.keepsLabels(reply.error, req) ? Model.hideCodes(root.entries, "") : []
+          root.entries = Model.keepsLabels(reply.error) ? Model.hideCodes(root.entries, "") : []
           root.codesError = reply.error
+          root.codesFresh = false
         }
         root.applyStatus()
       }
@@ -201,6 +212,7 @@ Item {
 
   function clearCodes() {
     root.codesGeneration++
+    root.codesFresh = false
     root.queuedRequest = null
     root.unlockQueued = false
     root.entries = []
@@ -211,6 +223,7 @@ Item {
 
   function dropCodes() {
     root.codesGeneration++
+    root.codesFresh = false
     root.queuedRequest = null
     root.entries = Model.hideCodes(root.entries, "")
     root.codesError = ""
