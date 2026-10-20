@@ -103,7 +103,7 @@ Panel {
   }
 
   function resetView() {
-    root.query = ""
+    root.clearSearch()
     root.selectedId = ""
     root.selectedByPointer = false
     root.copyGeneration++
@@ -266,9 +266,11 @@ Panel {
     onTriggered: root.actionFeedback = ""
   }
 
+  // The field's text is written only here and by the user, never bound:
+  // a binding would be dropped by the first assignment.
   function clearSearch() {
     root.query = ""
-    searchField.text = ""
+    if (searchField.text !== "") searchField.clear()
   }
 
   onSearchShownChanged: if (!root.searchShown) root.clearSearch()
@@ -316,7 +318,7 @@ Panel {
   }
 
   function escapeQuery() {
-    if (root.query !== "") root.query = ""
+    if (root.query !== "" || searchField.text !== "") root.clearSearch()
     else root.close()
   }
 
@@ -379,7 +381,6 @@ Panel {
         foreground: root.foreground
         dim: root.dim
         font.family: root.fontFamily
-        text: root.query
         countText: Model.searchCount(root.query, root.entries.length, root.filtered.length)
         onTextEdited: {
           if (root.searchShown) root.query = text
