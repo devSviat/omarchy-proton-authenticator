@@ -48,3 +48,7 @@ tempfile = "3.27.0"
 [[test]]
 name = "hardening"
 harness = false
+
+[[test]]
+name = "copy_detach"
+harness = false

@@ -73,10 +73,23 @@ pub fn is_dumpable() -> bool {
     dumpable != 0
 }
 
-/// Starts a new session so the process outlives the caller's process group.
+/// Starts a new session so the process outlives the caller's process group
+/// and terminal. A process group leader cannot do that; it is already out of
+/// reach of signals sent to its caller's group, so it only ignores SIGHUP.
 pub fn detach_session() -> Result<()> {
     // SAFETY: setsid has no arguments and no memory effects.
-    if unsafe { libc::setsid() } == -1 {
+    if unsafe { libc::setsid() } != -1 {
+        return Ok(());
+    }
+    let refused = errno() == Some(libc::EPERM);
+    // SAFETY: getpgrp has no arguments and cannot fail.
+    let leads_group = unsafe { libc::getpgrp() } == std::process::id() as libc::pid_t;
+    if !refused || !leads_group {
+        return Err(ErrorCode::Internal);
+    }
+    // SAFETY: SIG_IGN installs no handler code, so no Rust code can run in
+    // signal context.
+    if unsafe { libc::signal(libc::SIGHUP, libc::SIG_IGN) } == libc::SIG_ERR {
         return Err(ErrorCode::Internal);
     }
     Ok(())

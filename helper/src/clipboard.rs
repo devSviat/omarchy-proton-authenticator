@@ -10,7 +10,7 @@ use crate::error::{ErrorCode, Result};
 use crate::proc::{child_pgid, kill_and_reap, run_bounded, scrubbed_command, spawn_error};
 use crate::sys::{self, Signal};
 
-const DEFAULT_WL_COPY: &str = "/usr/bin/wl-copy";
+pub const WL_COPY: &str = "/usr/bin/wl-copy";
 const POLL_INTERVAL: Duration = Duration::from_millis(10);
 const TERM_GRACE: Duration = Duration::from_millis(500);
 const CLEAR_TIMEOUT: Duration = Duration::from_secs(2);
@@ -61,7 +61,7 @@ impl WlCopy {
 
 impl Default for WlCopy {
     fn default() -> Self {
-        Self::new(PathBuf::from(DEFAULT_WL_COPY))
+        Self::new(PathBuf::from(WL_COPY))
     }
 }
 

@@ -8,7 +8,7 @@ use crate::error::{ErrorCode, Result};
 use crate::proc::run_bounded;
 
 const GDBUS: &str = "/usr/bin/gdbus";
-const SECRET_TOOL: &str = "/usr/bin/secret-tool";
+pub const SECRET_TOOL: &str = "/usr/bin/secret-tool";
 const SERVICE: &str = "com.proton.authenticator";
 const ROOT_KEY_LEN: usize = 32;
 const SECRET_TOOL_MAX_OUT: usize = 64;

@@ -6,8 +6,9 @@ use std::path::Path;
 use aes_gcm::aead::{Aead, Payload};
 use aes_gcm::{Aes256Gcm, KeyInit};
 use hkdf::Hkdf;
-use pa_helper::app::{codes, CodesRequest, KeyProvider, LockState};
+use pa_helper::app::{check, codes, copy_code, CodesRequest, KeyProvider, LockState};
 use pa_helper::base32::base32_decode;
+use pa_helper::domain::EntryView;
 use pa_helper::error::{ErrorCode, Result};
 use pa_helper::otp::{steam, totp, Algorithm};
 use pa_helper::ssv::Value;
@@ -448,4 +449,95 @@ fn item_id_charset_and_length_accepted() {
     );
     let keys = FakeKeys::new(LockState::Unlocked);
     assert_eq!(codes(&vault, &keys, &req(None, false)).unwrap().len(), 2);
+}
+
+fn executable(dir: &Path, name: &str) -> std::path::PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let path = dir.join(name);
+    std::fs::write(&path, "#!/bin/sh\n").unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    path
+}
+
+#[test]
+fn check_ready_never_reads_the_key() {
+    let tmp = TempDir::new().unwrap();
+    let bin = TempDir::new().unwrap();
+    let dep = executable(bin.path(), "wl-copy");
+    let keys = FakeKeys::new(LockState::Unlocked);
+    let report = check(&standard(tmp.path()), &keys, &[dep.as_path()]);
+    assert_eq!(report.status, Ok(()));
+    assert!(report.vault_mtime.is_some());
+    assert_eq!(keys.root_calls.get(), 0);
+}
+
+#[test]
+fn check_stops_at_the_first_failing_step() {
+    let tmp = TempDir::new().unwrap();
+    let report = check(
+        &ProtonIdbVault::new(tmp.path().join("none")),
+        &FakeKeys::new(LockState::Unlocked),
+        &[],
+    );
+    assert_eq!(report.status, Err(ErrorCode::VaultNotFound));
+    assert_eq!(report.vault_mtime, None);
+
+    for (source, expected) in [(1, ErrorCode::AppLocked), (2, ErrorCode::UnsafeKeyStorage)] {
+        let tmp = TempDir::new().unwrap();
+        let vault = vault_with(tmp.path(), &key_ref(None, &SALT, source), &[]);
+        let keys = FakeKeys::new(LockState::Unlocked);
+        let report = check(&vault, &keys, &[]);
+        assert_eq!(report.status, Err(expected));
+        assert!(report.vault_mtime.is_some());
+        assert_eq!(keys.root_calls.get(), 0);
+    }
+
+    for (state, expected) in [
+        (LockState::Locked, ErrorCode::KeyringLocked),
+        (LockState::Missing, ErrorCode::KeyNotFound),
+    ] {
+        let tmp = TempDir::new().unwrap();
+        let keys = FakeKeys::new(state);
+        let report = check(&standard(tmp.path()), &keys, &[]);
+        assert_eq!(report.status, Err(expected));
+        assert_eq!(keys.root_calls.get(), 0);
+    }
+
+    let tmp = TempDir::new().unwrap();
+    let bin = TempDir::new().unwrap();
+    let present = executable(bin.path(), "secret-tool");
+    let missing = bin.path().join("wl-copy");
+    let report = check(
+        &standard(tmp.path()),
+        &FakeKeys::new(LockState::Unlocked),
+        &[present.as_path(), missing.as_path()],
+    );
+    assert_eq!(report.status, Err(ErrorCode::DependencyMissing));
+}
+
+fn view_with(code: Option<&str>, next: Option<&str>, remaining: u64) -> EntryView {
+    EntryView {
+        id: "x".into(),
+        issuer: "I".into(),
+        account: "a".into(),
+        kind: "totp",
+        code: code.map(str::to_string),
+        next_code: next.map(str::to_string),
+        period: 30,
+        digits: 6,
+        remaining,
+    }
+}
+
+#[test]
+fn copy_code_switches_to_next_near_the_boundary() {
+    let pick = |remaining| copy_code(view_with(Some("111111"), Some("222222"), remaining));
+    assert_eq!(pick(30).unwrap().as_str(), "111111");
+    assert_eq!(pick(5).unwrap().as_str(), "111111");
+    assert_eq!(pick(4).unwrap().as_str(), "222222");
+    assert_eq!(pick(1).unwrap().as_str(), "222222");
+    assert_eq!(
+        copy_code(view_with(None, None, 0)).unwrap_err(),
+        ErrorCode::InvalidArgument
+    );
 }

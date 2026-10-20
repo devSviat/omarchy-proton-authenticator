@@ -1,19 +1,18 @@
-use pa_helper::error::ErrorCode;
-use pa_helper::output::{render_err, render_ok};
-use serde::Serialize;
+#![deny(unsafe_code)]
 
-#[derive(Serialize)]
-struct VersionBody {
-    version: &'static str,
-}
+use std::ffi::OsString;
+use std::process::ExitCode;
 
-fn main() {
-    let mut args = std::env::args().skip(1);
-    let reply = match (args.next().as_deref(), args.next()) {
-        (Some("version"), None) => render_ok(&VersionBody {
-            version: env!("CARGO_PKG_VERSION"),
-        }),
-        _ => render_err(ErrorCode::InvalidArgument),
-    };
-    println!("{reply}");
+use pa_helper::cli;
+use pa_helper::clipboard::WlCopy;
+use pa_helper::output::render_err;
+use pa_helper::sys;
+
+fn main() -> ExitCode {
+    if let Err(code) = sys::harden() {
+        cli::emit(&render_err(code));
+        return ExitCode::FAILURE;
+    }
+    let args: Vec<OsString> = std::env::args_os().skip(1).collect();
+    cli::run(&args, &WlCopy::default(), cli::RUN_TIMEOUT)
 }
