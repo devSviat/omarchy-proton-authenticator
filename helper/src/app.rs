@@ -14,9 +14,10 @@ const SOURCE_PASSWORD: i32 = 1;
 const SOURCE_FALLBACK: i32 = 2;
 const KEY_ID_MAX_LEN: usize = 128;
 const ITEM_ID_MAX_LEN: usize = 128;
-/// A code with less time left than this is likely to expire before it is
-/// pasted, so `copy` takes the next one instead.
-const COPY_MIN_REMAINING: u64 = 5;
+/// A code with this many seconds left or fewer is likely to expire before it
+/// is pasted, so `copy` takes the next one instead. The panel marks the same
+/// window as urgent (`Model.isUrgent`).
+const COPY_NEXT_AT_REMAINING: u64 = 5;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LockState {
@@ -45,7 +46,7 @@ pub struct PrivateRequest {
 }
 
 /// Matches `^[A-Za-z0-9_][A-Za-z0-9_.:-]{0,127}$`.
-fn valid_key_id(id: &str) -> bool {
+pub fn valid_key_id(id: &str) -> bool {
     let bytes = id.as_bytes();
     let Some((first, rest)) = bytes.split_first() else {
         return false;
@@ -136,8 +137,8 @@ pub struct CheckReport {
 /// step: vault found, storage key keyring-backed, keyring item unlocked, then
 /// every path in `programs` executable.
 pub fn check(vault: &dyn VaultSource, keys: &dyn KeyProvider, programs: &[&Path]) -> CheckReport {
-    let vault_mtime = match vault.modified() {
-        Ok(mtime) => mtime,
+    let (vault_mtime, snapshot) = match vault.open() {
+        Ok(opened) => opened,
         Err(e) => {
             return CheckReport {
                 status: Err(e),
@@ -145,9 +146,7 @@ pub fn check(vault: &dyn VaultSource, keys: &dyn KeyProvider, programs: &[&Path]
             }
         }
     };
-    let status = vault
-        .snapshot()
-        .and_then(|snapshot| usable_key_ref(&*snapshot))
+    let status = usable_key_ref(&*snapshot)
         .and_then(|key_ref| require_unlocked(keys, keyring_id(&key_ref)))
         .and_then(|()| {
             if programs.iter().all(|p| is_executable(p)) {
@@ -170,7 +169,7 @@ fn is_executable(path: &Path) -> bool {
 pub fn copy_code(mut view: EntryView) -> Result<Zeroizing<String>> {
     let current = Zeroizing::new(view.code.take());
     let next = Zeroizing::new(view.next_code.take());
-    let mut chosen = if view.remaining < COPY_MIN_REMAINING {
+    let mut chosen = if view.remaining <= COPY_NEXT_AT_REMAINING {
         next
     } else {
         current
@@ -200,8 +199,11 @@ fn item_cipher(
 
 /// Every entry with its labels only, except `req.reveal`, which is computed
 /// in full. Labels are the vault's cleartext fields, so without `reveal`
-/// neither the keyring nor any ciphertext is touched; with it, only that item
-/// is decrypted.
+/// no ciphertext is touched; with it, only that item is decrypted.
+///
+/// Without `reveal` the keyring is touched only with `allow_prompt`: the root
+/// key is then read and dropped, which shows the unlock prompt for a locked
+/// keyring, so privacy mode can unlock without revealing a code.
 pub fn codes_private(
     vault: &dyn VaultSource,
     keys: &dyn KeyProvider,
@@ -232,6 +234,9 @@ pub fn codes_private(
         return Err(ErrorCode::ItemNotFound);
     }
 
+    if !found && req.allow_prompt {
+        drop(keys.root_key(keyring_id(&key_ref))?);
+    }
     if found {
         let cipher = item_cipher(keys, &key_ref, req.allow_prompt)?;
         snapshot.for_each_item(&mut |item| {

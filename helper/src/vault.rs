@@ -31,14 +31,12 @@ pub struct StorageKeyRef {
     pub adapter_key_id: Option<String>,
     pub salt: Zeroizing<Vec<u8>>,
     pub source: i32,
-    pub has_unsafe_key: bool,
 }
 
 impl fmt::Debug for StorageKeyRef {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("StorageKeyRef")
             .field("source", &self.source)
-            .field("has_unsafe_key", &self.has_unsafe_key)
             .finish_non_exhaustive()
     }
 }
@@ -47,15 +45,12 @@ pub struct EncryptedItem {
     pub id: String,
     pub issuer: String,
     pub name: String,
-    pub order: i32,
     pub data: Vec<u8>,
 }
 
 impl fmt::Debug for EncryptedItem {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("EncryptedItem")
-            .field("order", &self.order)
-            .finish_non_exhaustive()
+        f.debug_struct("EncryptedItem").finish_non_exhaustive()
     }
 }
 
@@ -70,8 +65,13 @@ pub trait Snapshot {
 }
 
 pub trait VaultSource {
-    fn modified(&self) -> Result<u64>;
-    fn snapshot(&self) -> Result<Box<dyn Snapshot>>;
+    /// Selects the vault once and returns its effective mtime (Unix seconds,
+    /// the later of the database and its WAL) with a snapshot of it.
+    fn open(&self) -> Result<(u64, Box<dyn Snapshot>)>;
+
+    fn snapshot(&self) -> Result<Box<dyn Snapshot>> {
+        self.open().map(|(_, snapshot)| snapshot)
+    }
 }
 
 pub struct ProtonIdbVault {
@@ -128,17 +128,13 @@ impl ProtonIdbVault {
 }
 
 impl VaultSource for ProtonIdbVault {
-    fn modified(&self) -> Result<u64> {
-        let (candidate, _) = self.select()?;
-        Ok(candidate
+    fn open(&self) -> Result<(u64, Box<dyn Snapshot>)> {
+        let (candidate, matched) = self.select()?;
+        let mtime = candidate
             .mtime
             .duration_since(UNIX_EPOCH)
-            .map_or(0, |d| d.as_secs()))
-    }
-
-    fn snapshot(&self) -> Result<Box<dyn Snapshot>> {
-        let (_, matched) = self.select()?;
-        Ok(Box::new(matched))
+            .map_or(0, |d| d.as_secs());
+        Ok((mtime, Box::new(matched)))
     }
 }
 
@@ -468,16 +464,11 @@ fn decode_key_ref(blob: &[u8]) -> Result<StorageKeyRef> {
         Some(Value::String(s)) => Some(s.clone()),
         Some(_) => return Err(ErrorCode::VaultFormatChanged),
     };
-    let has_unsafe_key = !matches!(
-        ssv::get(&record, "unsafe_key"),
-        None | Some(Value::Undefined)
-    );
     Ok(StorageKeyRef {
         id: string_field(&record, "id")?,
         adapter_key_id,
         salt: Zeroizing::new(bytes_field(&record, "salt")?),
         source: int_field(&record, "source")?,
-        has_unsafe_key,
     })
 }
 
@@ -498,7 +489,6 @@ fn read_items(matched: &Matched, f: &mut dyn FnMut(EncryptedItem) -> Result<()>)
                 id: string_field(&record, "id")?,
                 issuer: string_field(&record, "issuer")?,
                 name: string_field(&record, "name")?,
-                order: int_field(&record, "order")?,
                 data: bytes_field(&record, "__encryptedData")?,
             };
             drop(record);

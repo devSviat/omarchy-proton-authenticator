@@ -4,13 +4,12 @@ use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
 use crate::base32::base32_decode;
-use crate::otp::{steam, totp, Algorithm};
+use crate::otp::{steam, totp, Algorithm, STEAM_PERIOD};
 use crate::uri::parse_otpauth;
 
 const LABEL_MAX_CHARS: usize = 256;
 const DEFAULT_PERIOD: u64 = 30;
 const MAX_PERIOD: u64 = 86_400;
-const STEAM_PERIOD: u64 = 30;
 const STEAM_DIGITS: u32 = 5;
 
 pub struct Secret(Zeroizing<Vec<u8>>);

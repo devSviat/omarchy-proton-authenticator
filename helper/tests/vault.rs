@@ -48,6 +48,10 @@ fn vault(root: &Path) -> ProtonIdbVault {
     ProtonIdbVault::new(root.to_path_buf())
 }
 
+fn mtime_of(root: &Path) -> Result<u64, ErrorCode> {
+    vault(root).open().map(|(mtime, _)| mtime)
+}
+
 fn listing(dir: &Path) -> Vec<String> {
     let mut names: Vec<String> = fs::read_dir(dir)
         .unwrap()
@@ -80,15 +84,41 @@ fn loads_key_ref_and_items() {
     assert_eq!(key.adapter_key_id.as_deref(), Some("adapter-1"));
     assert_eq!(key.salt.as_slice(), &[7; 32]);
     assert_eq!(key.source, 0);
-    assert!(!key.has_unsafe_key);
 
-    items.sort_by_key(|i| i.order);
+    items.sort_by(|a, b| a.id.cmp(&b.id));
     assert_eq!(items.len(), 2);
     assert_eq!(items[0].id, "item-1");
     assert_eq!(items[0].issuer, "GitHub");
     assert_eq!(items[0].name, "me@example.com");
-    assert_eq!(items[0].order, 1);
     assert_eq!(items[0].data, vec![1; 40]);
+}
+
+#[test]
+fn item_order_is_neither_required_nor_read() {
+    let with_order = |order: Option<Value>| {
+        let mut props = vec![
+            ("id", s("item-1")),
+            ("issuer", s("GitHub")),
+            ("name", s("me@example.com")),
+        ];
+        if let Some(order) = order {
+            props.push(("order", order));
+        }
+        props.push(("__encryptedData", bytes(&[1; 40])));
+        obj(props)
+    };
+    for order in [
+        None,
+        Some(s("1")),
+        Some(Value::Null),
+        Some(Value::Undefined),
+    ] {
+        let tmp = TempDir::new().unwrap();
+        write_vault(tmp.path(), &key_ref(), &[with_order(order)]);
+        let (_, items) = vault(tmp.path()).load().unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].id, "item-1");
+    }
 }
 
 #[test]
@@ -106,7 +136,7 @@ fn adapter_key_id_is_optional() {
 }
 
 #[test]
-fn unsafe_key_is_flagged_but_never_exposed() {
+fn unsafe_key_is_never_exposed() {
     let tmp = TempDir::new().unwrap();
     let with_unsafe = obj(vec![
         ("id", s("key-1")),
@@ -116,21 +146,8 @@ fn unsafe_key_is_flagged_but_never_exposed() {
     ]);
     write_vault(tmp.path(), &with_unsafe, &[]);
     let (key, _) = vault(tmp.path()).load().unwrap();
-    assert!(key.has_unsafe_key);
+    assert_eq!(key.source, 2);
     assert!(!format!("{key:?}").contains('9'));
-}
-
-#[test]
-fn undefined_unsafe_key_is_not_flagged() {
-    let tmp = TempDir::new().unwrap();
-    let k = obj(vec![
-        ("id", s("key-1")),
-        ("salt", bytes(&[7; 32])),
-        ("source", Value::Int(0)),
-        ("unsafe_key", Value::Undefined),
-    ]);
-    write_vault(tmp.path(), &k, &[]);
-    assert!(!vault(tmp.path()).load().unwrap().0.has_unsafe_key);
 }
 
 #[test]
@@ -158,7 +175,7 @@ fn newest_matching_db_wins() {
     set_mtime(&db_path(&tmp.path().join("new")), 2_000_000);
 
     assert_eq!(vault(tmp.path()).load().unwrap().0.id, "key-new");
-    assert_eq!(vault(tmp.path()).modified().unwrap(), 2_000_000);
+    assert_eq!(mtime_of(tmp.path()), Ok(2_000_000));
 }
 
 #[test]
@@ -167,7 +184,7 @@ fn missing_root_is_vault_not_found() {
     let err = vault(&tmp.path().join("nope")).load().unwrap_err();
     assert_eq!(err, ErrorCode::VaultNotFound);
     assert_eq!(
-        vault(&tmp.path().join("nope")).modified().unwrap_err(),
+        mtime_of(&tmp.path().join("nope")).unwrap_err(),
         ErrorCode::VaultNotFound
     );
 }
@@ -253,13 +270,6 @@ fn wrongly_typed_or_missing_fields_are_format_changed() {
     }
 
     let bad_items = [
-        obj(vec![
-            ("id", s("i")),
-            ("issuer", s("x")),
-            ("name", s("y")),
-            ("order", s("1")),
-            ("__encryptedData", bytes(&[1; 20])),
-        ]),
         obj(vec![
             ("id", s("i")),
             ("issuer", s("x")),
@@ -421,10 +431,10 @@ fn modified_is_max_of_db_and_wal() {
 
     set_mtime(&db, 1_000_000);
     set_mtime(&wal, 2_000_000);
-    assert_eq!(vault(tmp.path()).modified().unwrap(), 2_000_000);
+    assert_eq!(mtime_of(tmp.path()), Ok(2_000_000));
 
     set_mtime(&db, 3_000_000);
-    assert_eq!(vault(tmp.path()).modified().unwrap(), 3_000_000);
+    assert_eq!(mtime_of(tmp.path()), Ok(3_000_000));
 }
 
 #[test]
@@ -437,7 +447,7 @@ fn modified_without_wal_uses_db_mtime() {
             .modified()
             .unwrap(),
     );
-    assert_eq!(vault(tmp.path()).modified().unwrap(), expected);
+    assert_eq!(mtime_of(tmp.path()), Ok(expected));
 }
 
 #[test]

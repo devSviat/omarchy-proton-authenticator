@@ -10,7 +10,7 @@ pub enum Algorithm {
 }
 
 pub const STEAM_ALPHABET: &[u8; 26] = b"23456789BCDFGHJKMNPQRTVWXY";
-const STEAM_PERIOD: u64 = 30;
+pub const STEAM_PERIOD: u64 = 30;
 pub const STEAM_LENGTH: usize = 5;
 
 fn mac<M: Mac + KeyInit>(key: &[u8], counter: u64) -> Vec<u8> {

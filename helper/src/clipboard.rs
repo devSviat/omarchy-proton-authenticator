@@ -14,11 +14,19 @@ pub const WL_COPY: &str = "/usr/bin/wl-copy";
 const POLL_INTERVAL: Duration = Duration::from_millis(10);
 const TERM_GRACE: Duration = Duration::from_millis(500);
 const CLEAR_TIMEOUT: Duration = Duration::from_secs(2);
+/// wl-copy that cannot take the selection (no compositor, a protocol error)
+/// exits within milliseconds of reading its input. Still running after this
+/// long counts as holding the selection.
+const START_GRACE: Duration = Duration::from_millis(250);
 
 pub trait Clipboard {
     /// Puts `code` on the clipboard. The returned hold clears it once
     /// `clear_after` has passed since this call, unless another client has
     /// taken the selection by then.
+    ///
+    /// Errors: `DependencyMissing` if the clipboard tool is missing;
+    /// `Internal` if it fails, including exiting during the start-up grace
+    /// period.
     fn start(&self, code: Zeroizing<String>, clear_after: Duration) -> Result<Box<dyn Hold>>;
 
     /// [`Clipboard::start`] followed by [`Hold::wait_and_clear`].
@@ -30,7 +38,8 @@ pub trait Clipboard {
 /// A code on the clipboard that still has to be cleared.
 pub trait Hold {
     /// Blocks until another client takes the selection or the deadline
-    /// passes, then clears the selection in the latter case.
+    /// passes, then clears the selection in the latter case. A clipboard
+    /// owner that exits with a failure status is an `Internal` error.
     fn wait_and_clear(self: Box<Self>) -> Result<()>;
 
     /// Gives up holding at once and clears the selection.
@@ -151,8 +160,18 @@ impl Clipboard for WlCopy {
             deadline,
             settled: false,
         };
-        match feed(&mut hold.child, code) {
-            Ok(()) => Ok(Box::new(hold)),
+        if let Err(e) = feed(&mut hold.child, code) {
+            return Err(hold.fail(e));
+        }
+        match wait_exit(hold.pgid, Instant::now() + START_GRACE) {
+            Ok(false) => Ok(Box::new(hold)),
+            // The selection died with its owner, so a clear could only hit
+            // another client's.
+            Ok(true) => {
+                hold.settled = true;
+                let _ = reap(&mut hold.child);
+                Err(ErrorCode::Internal)
+            }
             Err(e) => Err(hold.fail(e)),
         }
     }
@@ -162,7 +181,12 @@ impl Hold for WlCopyHold {
     fn wait_and_clear(mut self: Box<Self>) -> Result<()> {
         self.settled = true;
         match wait_exit(self.pgid, self.deadline) {
-            Ok(true) => return reap(&mut self.child).map(drop),
+            Ok(true) => {
+                return match reap(&mut self.child)? {
+                    status if status.success() => Ok(()),
+                    _ => Err(ErrorCode::Internal),
+                }
+            }
             Ok(false) => {}
             Err(e) => return Err(self.fail(e)),
         }

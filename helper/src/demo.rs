@@ -62,9 +62,9 @@ const ACCOUNTS: [DemoAccount; 6] = [
         seed: SEED_SHA512,
     },
     DemoAccount {
-        id: "demo-discord",
-        issuer: "Discord",
-        account: "alex#0001",
+        id: "demo-steam",
+        issuer: "Steam",
+        account: "alex_steam",
         kind: OtpKind::Steam,
         seed: SEED_SHA1,
     },

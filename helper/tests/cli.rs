@@ -231,7 +231,7 @@ fn demo_codes_shape() {
         .collect();
     assert_eq!(
         issuers,
-        ["AWS", "Discord", "GitHub", "Google", "Proton", "Tailscale"]
+        ["AWS", "GitHub", "Google", "Proton", "Steam", "Tailscale"]
     );
     for entry in entries {
         let mut fields: Vec<&String> = entry.as_object().unwrap().keys().collect();
@@ -257,6 +257,8 @@ fn demo_codes_shape() {
         assert_eq!(entry["remaining"].as_u64().unwrap(), period - at % period);
     }
     assert_eq!(entries.iter().filter(|e| e["kind"] == "steam").count(), 1);
+    let steam = entries.iter().find(|e| e["issuer"] == "Steam").unwrap();
+    assert_eq!(steam["kind"], "steam");
     assert_eq!(entries.iter().filter(|e| e["digits"] == 8).count(), 1);
 
     let github = entries.iter().find(|e| e["issuer"] == "GitHub").unwrap();
@@ -664,15 +666,17 @@ fn private_demo_hides_every_code() {
         ids,
         [
             "demo-aws",
-            "demo-discord",
             "demo-github",
             "demo-google",
             "demo-proton",
+            "demo-steam",
             "demo-tailscale"
         ]
     );
-    assert_eq!(entries[2]["issuer"], "GitHub");
-    assert_eq!(entries[2]["account"], "octocat@example.com");
+    assert_eq!(entries[1]["issuer"], "GitHub");
+    assert_eq!(entries[1]["account"], "octocat@example.com");
+    assert_eq!(entries[4]["issuer"], "Steam");
+    assert_eq!(entries[4]["account"], "alex_steam");
     entries.iter().for_each(assert_hidden);
     assert_no_code_leaks(&text, at, None);
 }

@@ -16,7 +16,11 @@ static SERIAL: Mutex<()> = Mutex::new(());
 
 enum Mode {
     Hold,
-    ExitAfter100ms,
+    /// Outlives the start-up grace period, then exits as wl-copy does when
+    /// another client takes the selection.
+    ExitAfter500ms,
+    FailAfter50ms,
+    FailAfter500ms,
 }
 
 struct Fake {
@@ -30,7 +34,9 @@ impl Fake {
         let d = dir.path().display();
         let tail = match mode {
             Mode::Hold => "/usr/bin/sleep 30 &\nwait",
-            Mode::ExitAfter100ms => "/usr/bin/sleep 0.1",
+            Mode::ExitAfter500ms => "/usr/bin/sleep 0.5",
+            Mode::FailAfter50ms => "/usr/bin/sleep 0.05\nexit 1",
+            Mode::FailAfter500ms => "/usr/bin/sleep 0.5\nexit 1",
         };
         let script = format!(
             "#!/bin/sh\n\
@@ -93,7 +99,7 @@ fn holder_kills_owner_at_deadline() {
 #[test]
 fn holder_leaves_newer_clipboard_alone() {
     let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
-    let fake = Fake::new(Mode::ExitAfter100ms);
+    let fake = Fake::new(Mode::ExitAfter500ms);
     let start = Instant::now();
     hold(&fake.program, Duration::from_secs(3)).unwrap();
     assert!(start.elapsed() < Duration::from_secs(1));
@@ -105,7 +111,7 @@ fn holder_leaves_newer_clipboard_alone() {
 #[test]
 fn code_reaches_stdin_not_argv() {
     let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
-    let fake = Fake::new(Mode::ExitAfter100ms);
+    let fake = Fake::new(Mode::ExitAfter500ms);
     hold(&fake.program, Duration::from_secs(3)).unwrap();
     assert_eq!(fake.read("stdin").as_deref(), Some(CODE));
     let argv = fake.read("argv").unwrap();
@@ -128,7 +134,7 @@ fn missing_program_is_dependency_missing() {
 #[test]
 fn overflowing_deadline_is_internal_before_spawning() {
     let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
-    let fake = Fake::new(Mode::ExitAfter100ms);
+    let fake = Fake::new(Mode::ExitAfter500ms);
     assert_eq!(
         hold(&fake.program, Duration::MAX).unwrap_err(),
         ErrorCode::Internal
@@ -167,4 +173,29 @@ fn dropped_hold_kills_owner_and_clears() {
     assert!(start.elapsed() < Duration::from_secs(2));
     assert_eq!(fake.read("clear").as_deref(), Some("clear\n"));
     assert!(wait_group_gone(pgid), "fake wl-copy group still alive");
+}
+
+#[test]
+fn wl_copy_failing_at_once_is_an_error() {
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let fake = Fake::new(Mode::FailAfter50ms);
+    let start = Instant::now();
+    let started = WlCopy::new(fake.program.clone())
+        .start(Zeroizing::new(CODE.to_string()), Duration::from_secs(30));
+    assert_eq!(started.err(), Some(ErrorCode::Internal));
+    assert!(start.elapsed() < Duration::from_secs(1));
+    assert_eq!(fake.read("stdin").as_deref(), Some(CODE));
+    // Its selection died with it, so a clear could only hit someone else's.
+    assert_eq!(fake.read("clear"), None);
+}
+
+#[test]
+fn wl_copy_failing_later_is_an_error() {
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let fake = Fake::new(Mode::FailAfter500ms);
+    let hold = WlCopy::new(fake.program.clone())
+        .start(Zeroizing::new(CODE.to_string()), Duration::from_secs(30))
+        .unwrap();
+    assert_eq!(hold.wait_and_clear().unwrap_err(), ErrorCode::Internal);
+    assert_eq!(fake.read("clear"), None);
 }

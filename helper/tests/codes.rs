@@ -14,7 +14,7 @@ use pa_helper::domain::{EntryView, PrivateEntry};
 use pa_helper::error::{ErrorCode, Result};
 use pa_helper::otp::{steam, totp, Algorithm};
 use pa_helper::ssv::Value;
-use pa_helper::vault::ProtonIdbVault;
+use pa_helper::vault::{ProtonIdbVault, Snapshot, VaultSource};
 use sha2::Sha256;
 use support::fixture::write_vault;
 use tempfile::TempDir;
@@ -154,6 +154,18 @@ impl KeyProvider for FakeKeys {
         self.root_calls.set(self.root_calls.get() + 1);
         *self.last_key_id.borrow_mut() = key_id.to_string();
         Ok(Zeroizing::new(self.root))
+    }
+}
+
+struct FailingKeys(ErrorCode);
+
+impl KeyProvider for FailingKeys {
+    fn lock_state(&self, _key_id: &str) -> Result<LockState> {
+        Err(self.0)
+    }
+
+    fn root_key(&self, _key_id: &str) -> Result<Zeroizing<[u8; 32]>> {
+        Err(self.0)
     }
 }
 
@@ -485,6 +497,31 @@ fn check_ready_never_reads_the_key() {
     assert_eq!(keys.root_calls.get(), 0);
 }
 
+struct CountingVault {
+    inner: ProtonIdbVault,
+    opens: Cell<u32>,
+}
+
+impl VaultSource for CountingVault {
+    fn open(&self) -> Result<(u64, Box<dyn Snapshot>)> {
+        self.opens.set(self.opens.get() + 1);
+        self.inner.open()
+    }
+}
+
+#[test]
+fn check_reads_the_vault_once() {
+    let tmp = TempDir::new().unwrap();
+    let vault = CountingVault {
+        inner: standard(tmp.path()),
+        opens: Cell::new(0),
+    };
+    let report = check(&vault, &FakeKeys::new(LockState::Unlocked), &[]);
+    assert_eq!(report.status, Ok(()));
+    assert!(report.vault_mtime.is_some());
+    assert_eq!(vault.opens.get(), 1);
+}
+
 #[test]
 fn check_stops_at_the_first_failing_step() {
     let tmp = TempDir::new().unwrap();
@@ -547,7 +584,8 @@ fn view_with(code: Option<&str>, next: Option<&str>, remaining: u64) -> EntryVie
 fn copy_code_switches_to_next_near_the_boundary() {
     let pick = |remaining| copy_code(view_with(Some("111111"), Some("222222"), remaining));
     assert_eq!(pick(30).unwrap().as_str(), "111111");
-    assert_eq!(pick(5).unwrap().as_str(), "111111");
+    assert_eq!(pick(6).unwrap().as_str(), "111111");
+    assert_eq!(pick(5).unwrap().as_str(), "222222");
     assert_eq!(pick(4).unwrap().as_str(), "222222");
     assert_eq!(pick(1).unwrap().as_str(), "222222");
     assert_eq!(
@@ -587,21 +625,53 @@ fn private_without_reveal_never_touches_the_keyring() {
         let tmp = TempDir::new().unwrap();
         let vault = standard(tmp.path());
         let keys = FakeKeys::new(state);
-        for allow_prompt in [false, true] {
-            let entries = codes_private(&vault, &keys, &private_req(None, allow_prompt)).unwrap();
-            let json = private_json(&entries);
-            assert_eq!(json.len(), 2);
-            assert_eq!(json[0]["id"], "t1");
-            assert_eq!(json[0]["issuer"], "GitHub");
-            assert_eq!(json[0]["account"], "me@example.com");
-            assert_eq!(json[1]["id"], "s1");
-            assert_eq!(json[1]["issuer"], "Steam");
-            assert_eq!(json[1]["account"], "gamer");
-            json.iter().for_each(assert_hidden);
-        }
+        let entries = codes_private(&vault, &keys, &private_req(None, false)).unwrap();
+        let json = private_json(&entries);
+        assert_eq!(json.len(), 2);
+        assert_eq!(json[0]["id"], "t1");
+        assert_eq!(json[0]["issuer"], "GitHub");
+        assert_eq!(json[0]["account"], "me@example.com");
+        assert_eq!(json[1]["id"], "s1");
+        assert_eq!(json[1]["issuer"], "Steam");
+        assert_eq!(json[1]["account"], "gamer");
+        json.iter().for_each(assert_hidden);
         assert_eq!(keys.lock_calls.get(), 0);
         assert_eq!(keys.root_calls.get(), 0);
     }
+}
+
+#[test]
+fn private_unlock_without_reveal_reads_the_key_and_decrypts_nothing() {
+    let tmp = TempDir::new().unwrap();
+    let vault = vault_with(
+        tmp.path(),
+        &key_ref(Some("adapter-1"), &SALT, 0),
+        &[
+            totp_item("good", "GitHub", "me"),
+            item("bad", "X", "y", 2, vec![0; 40]),
+        ],
+    );
+    for state in [LockState::Locked, LockState::Unlocked] {
+        let keys = FakeKeys::new(state);
+        let entries = codes_private(&vault, &keys, &private_req(None, true)).unwrap();
+        let json = private_json(&entries);
+        assert_eq!(json.len(), 2);
+        assert_eq!(json[0]["id"], "good");
+        assert_eq!(json[1]["id"], "bad");
+        json.iter().for_each(assert_hidden);
+        assert_eq!(keys.root_calls.get(), 1);
+        assert_eq!(keys.lock_calls.get(), 0);
+        assert_eq!(*keys.last_key_id.borrow(), "adapter-1");
+    }
+}
+
+#[test]
+fn private_unlock_without_reveal_reports_keyring_failures() {
+    let tmp = TempDir::new().unwrap();
+    let vault = standard(tmp.path());
+    let keys = FailingKeys(ErrorCode::KeyNotFound);
+    let err = codes_private(&vault, &keys, &private_req(None, true)).unwrap_err();
+    assert_eq!(err, ErrorCode::KeyNotFound);
 }
 
 #[test]

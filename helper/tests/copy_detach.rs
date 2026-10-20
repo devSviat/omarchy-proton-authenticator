@@ -331,6 +331,92 @@ fn killed_holder_takes_the_code_along() {
     assert!(wait_until(Duration::from_secs(2), || !running(owner)));
 }
 
+/// Exits 1 shortly after reading the code, as wl-copy does when it cannot
+/// take the selection.
+fn failing_wl_copy(dir: &Path) -> PathBuf {
+    let d = dir.display();
+    let script = format!(
+        "#!/bin/sh\n\
+         if [ \"$1\" = --clear ]; then echo clear >> {d}/clear; exit 0; fi\n\
+         /usr/bin/cat > {d}/stdin\n\
+         /usr/bin/sleep 0.05\n\
+         exit 1\n"
+    );
+    let program = dir.join("wl-copy");
+    fs::write(&program, script).unwrap();
+    fs::set_permissions(&program, fs::Permissions::from_mode(0o700)).unwrap();
+    program
+}
+
+fn failing_wl_copy_is_reported() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut child = Command::new(std::env::current_exe().unwrap())
+        .env_clear()
+        .args([CHILD, "5000"])
+        .arg(failing_wl_copy(dir.path()))
+        .args(["copy", "demo-github", "--demo", "--clear-after", "5"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let reply = read_until_eof(&mut child);
+    let status = wait_exit(&mut child, Duration::from_secs(2));
+    assert_eq!(
+        reply,
+        "{\"ok\":false,\"protocol\":1,\"error\":\"INTERNAL\"}\n"
+    );
+    assert_eq!(status.code(), Some(1));
+    assert!(read_file(dir.path(), "stdin").is_some());
+    assert_eq!(read_file(dir.path(), "clear"), None);
+    assert!(wait_until(Duration::from_secs(2), || processes_mentioning(
+        dir.path()
+    )
+    .is_empty()));
+}
+
+/// Fds the caller leaks without `FD_CLOEXEC` (as Quickshell does) must not
+/// reach the holder or wl-copy. Fd 7 duplicates the caller's stdout pipe, so
+/// a process that kept it would hold off EOF until the clipboard deadline.
+/// The holder is not dumpable, so its /proc/<pid>/fd cannot be listed
+/// directly; the EOF stands in for that.
+fn inherited_fds_are_closed() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path().display();
+    let script = format!(
+        "#!/bin/sh\n\
+         if [ \"$1\" = --clear ]; then exit 0; fi\n\
+         /usr/bin/cat > {d}/stdin\n\
+         for fd in /proc/$$/fd/*; do echo \"${{fd##*/}}\"; done > {d}/fds\n\
+         /usr/bin/sleep 300 &\n\
+         trap 'kill $!; exit 143' TERM\n\
+         wait\n"
+    );
+    let program = dir.path().join("wl-copy");
+    fs::write(&program, script).unwrap();
+    fs::set_permissions(&program, fs::Permissions::from_mode(0o700)).unwrap();
+
+    let start = Instant::now();
+    let mut child = Command::new("/bin/sh")
+        .env_clear()
+        .args(["-c", "exec 7>&1; exec \"$0\" \"$@\""])
+        .arg(std::env::current_exe().unwrap())
+        .args([CHILD, "1000"])
+        .arg(&program)
+        .args(["copy", "demo-github", "--demo", "--clear-after", "5"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    assert_eq!(read_until_eof(&mut child), "{\"ok\":true,\"protocol\":1}\n");
+    assert!(start.elapsed() < Duration::from_secs(3));
+    wait_exit(&mut child, Duration::from_secs(1));
+    let fds = wait_file(dir.path(), "fds", Duration::from_secs(2));
+    assert!(
+        !fds.lines().any(|fd| fd == "7"),
+        "wl-copy inherited fd 7: {fds}"
+    );
+}
+
 fn holder_memlock_failure_is_reported() {
     let dir = tempfile::tempdir().unwrap();
     let mut child = Command::new(std::env::current_exe().unwrap())
@@ -538,7 +624,7 @@ fn main() -> ExitCode {
         eprintln!("copy_detach: skipped, RLIMIT_MEMLOCK is below 8 MiB");
         return ExitCode::SUCCESS;
     }
-    let tests: [(&str, fn()); 9] = [
+    let tests: [(&str, fn()); 11] = [
         ("copy_exits_and_holder_clears", || {
             copy_exits_and_holder_clears(false)
         }),
@@ -557,6 +643,8 @@ fn main() -> ExitCode {
         ("hold_rejects_bad_arguments", hold_rejects_bad_arguments),
         ("stalled_run_times_out", stalled_run_times_out),
         ("missing_wl_copy_is_reported", missing_wl_copy_is_reported),
+        ("failing_wl_copy_is_reported", failing_wl_copy_is_reported),
+        ("inherited_fds_are_closed", inherited_fds_are_closed),
         (
             "watchdog_kills_the_running_child_group",
             watchdog_kills_the_running_child_group,

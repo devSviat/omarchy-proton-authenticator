@@ -29,7 +29,8 @@ const STATUS_DEPENDENCY_MISSING: u8 = b'D';
 const STATUS_MEMLOCK_FAILED: u8 = b'M';
 const STATUS_FAILED: u8 = b'E';
 
-/// How long `copy` waits for the holder to confirm that wl-copy has the code.
+/// How long `copy` waits for the holder's status byte. Covers the holder's
+/// start-up and wl-copy's start-up grace period.
 const STATUS_TIMEOUT: Duration = Duration::from_secs(3);
 /// Covers the ownership check, wl-copy's TERM grace and `wl-copy --clear`
 /// after the deadline.
@@ -67,13 +68,15 @@ impl Holder {
         Self { program, prefix }
     }
 
-    /// Starts a holder for `code` and returns once it has put the code on the
-    /// clipboard. The code reaches the holder only through its stdin.
+    /// Starts a holder for `code` and returns once it reports that wl-copy
+    /// took the code and outlived its start-up grace period. The code
+    /// reaches the holder only through its stdin.
     ///
     /// Errors: `DependencyMissing` if wl-copy is missing; `MemlockFailed` if
     /// the holder cannot harden itself; `Internal` for any other failure,
-    /// including a holder that cannot be started or does not confirm within
-    /// [`STATUS_TIMEOUT`]. On error the holder's group has been killed.
+    /// including wl-copy exiting during its grace period and a holder that
+    /// cannot be started or does not confirm within [`STATUS_TIMEOUT`]. On
+    /// error the holder's group has been killed.
     pub fn hand_off(&self, code: Zeroizing<String>, clear_after: Duration) -> Result<()> {
         let mut command = scrubbed_env_command(&self.program);
         command

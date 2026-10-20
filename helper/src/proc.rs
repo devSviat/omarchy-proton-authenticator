@@ -425,7 +425,7 @@ mod tests {
     }
 
     #[test]
-    fn run_bounded_success_does_not_wait_for_grandchild() {
+    fn run_bounded_times_out_while_a_grandchild_holds_stdout() {
         let start = Instant::now();
         let r = run_bounded(
             Path::new("/bin/sh"),

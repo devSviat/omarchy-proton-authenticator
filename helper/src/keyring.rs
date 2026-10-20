@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use zeroize::Zeroizing;
 
-use crate::app::{KeyProvider, LockState};
+use crate::app::{valid_key_id, KeyProvider, LockState};
 use crate::error::{ErrorCode, Result};
 use crate::proc::run_bounded;
 
@@ -16,7 +16,6 @@ const SECRET_TOOL_TIMEOUT: Duration = Duration::from_secs(10);
 const GDBUS_MAX_OUT: usize = 4096;
 const GDBUS_TIMEOUT: Duration = Duration::from_secs(5);
 const SECRETS_PATH_PREFIX: &str = "/org/freedesktop/secrets/";
-const KEY_ID_MAX_LEN: usize = 128;
 
 /// Key provider backed by the Secret Service, via `gdbus` and `secret-tool`
 /// run by absolute path.
@@ -55,16 +54,7 @@ impl Default for SecretToolKeys {
 /// The id is interpolated into a GVariant text argument, so it must not be
 /// able to close the quote.
 fn check_key_id(id: &str) -> Result<()> {
-    let bytes = id.as_bytes();
-    let Some((first, rest)) = bytes.split_first() else {
-        return Err(ErrorCode::InvalidArgument);
-    };
-    let ok = bytes.len() <= KEY_ID_MAX_LEN
-        && (first.is_ascii_alphanumeric() || *first == b'_')
-        && rest
-            .iter()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b':' | b'-'));
-    if ok {
+    if valid_key_id(id) {
         Ok(())
     } else {
         Err(ErrorCode::InvalidArgument)

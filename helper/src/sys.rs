@@ -75,20 +75,47 @@ pub fn is_dumpable() -> bool {
     dumpable != 0
 }
 
+/// Marks every descriptor above stderr close-on-exec, so descriptors the
+/// caller leaked without `FD_CLOEXEC` never reach the exec'd program.
+///
+/// Marking instead of closing keeps std's own close-on-exec pipe, through
+/// which a failed exec (a missing program) is reported. Kernels before 5.11
+/// lack the flag (ENOSYS or EINVAL) and are left as they are.
+///
+/// Async-signal-safe: one raw syscall, no allocation.
+fn cloexec_inherited_fds() -> io::Result<()> {
+    // SAFETY: close_range takes three plain integers and touches no memory;
+    // with CLOSE_RANGE_CLOEXEC it only sets descriptor flags.
+    let rc = unsafe {
+        libc::syscall(
+            libc::SYS_close_range,
+            3 as libc::c_long,
+            libc::c_long::from(u32::MAX),
+            libc::CLOSE_RANGE_CLOEXEC as libc::c_long,
+        )
+    };
+    match rc {
+        0 => Ok(()),
+        _ if matches!(errno(), Some(libc::ENOSYS | libc::EINVAL)) => Ok(()),
+        _ => Err(io::Error::last_os_error()),
+    }
+}
+
 /// Makes the child that `command` spawns start a new session before exec,
 /// so it leads its own session and process group (pgid == pid) and has no
 /// controlling terminal: signals to the caller's group or a terminal hangup
-/// never reach it. Must not be combined with `process_group`.
+/// never reach it. Must not be combined with `process_group`. Inherited
+/// descriptors beyond stdio are not passed on.
 pub fn new_session_on_spawn(command: &mut Command) {
     // SAFETY: the closure runs in the child between fork and exec and makes
-    // only the async-signal-safe setsid call without allocating; an OS error
-    // is stored inline in io::Error.
+    // only async-signal-safe calls (setsid, close_range) without allocating;
+    // an OS error is stored inline in io::Error.
     unsafe {
         command.pre_exec(|| {
             if libc::setsid() == -1 {
                 return Err(io::Error::last_os_error());
             }
-            Ok(())
+            cloexec_inherited_fds()
         });
     }
 }
@@ -130,14 +157,15 @@ pub fn close_stdout() -> Result<()> {
 
 /// Makes the child that `command` spawns receive SIGTERM once the spawning
 /// thread ends, so a killed holder never leaves its clipboard owner behind.
+/// Inherited descriptors beyond stdio are not passed on.
 ///
 /// The signal follows the thread, not the process: spawn from a thread that
 /// lives as long as the child is needed.
 pub fn term_when_parent_dies(command: &mut Command) {
     let parent = std::process::id() as libc::pid_t;
     // SAFETY: the closure runs in the child between fork and exec and makes
-    // only async-signal-safe calls (prctl, getppid) without allocating; an
-    // OS error is stored inline in io::Error.
+    // only async-signal-safe calls (prctl, getppid, close_range) without
+    // allocating; an OS error is stored inline in io::Error.
     unsafe {
         command.pre_exec(move || {
             if libc::prctl(
@@ -154,7 +182,7 @@ pub fn term_when_parent_dies(command: &mut Command) {
             if libc::getppid() != parent {
                 return Err(io::Error::from_raw_os_error(libc::ESRCH));
             }
-            Ok(())
+            cloexec_inherited_fds()
         });
     }
 }

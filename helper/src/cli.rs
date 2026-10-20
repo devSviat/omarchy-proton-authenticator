@@ -43,10 +43,10 @@ impl Timeouts {
     pub fn for_command(&self, command: &Command) -> Duration {
         match command {
             Command::Codes {
-                mode,
                 allow_prompt: true,
                 demo: false,
-            } if mode.may_decrypt() => self.prompt,
+                ..
+            } => self.prompt,
             _ => self.run,
         }
     }
@@ -73,16 +73,6 @@ pub enum CodesMode {
     Private {
         reveal: Option<String>,
     },
-}
-
-impl CodesMode {
-    /// Whether the call opens the keyring, and so may show an unlock prompt.
-    pub fn may_decrypt(&self) -> bool {
-        match self {
-            Self::All { .. } => true,
-            Self::Private { reveal } => reveal.is_some(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -355,9 +345,10 @@ fn finish(watchdog: Watchdog, reply: Rendered) -> ExitCode {
     exit_code(reply.ok)
 }
 
-/// Replies only once a detached holder has the code on the clipboard, so a
-/// missing or failing wl-copy is still reported, and the holder clears it at
-/// the deadline whatever happens to this process afterwards.
+/// Replies only once a detached holder reports that wl-copy has read the
+/// code and is still running after a short grace period, so a missing
+/// wl-copy, or one that fails at once, is reported. The holder clears the
+/// code at the deadline whatever happens to this process afterwards.
 fn copy(
     id: String,
     clear_after: Duration,
@@ -542,6 +533,10 @@ mod tests {
         assert_eq!(budget(&["codes", "--private"]), timeouts.run);
         assert_eq!(
             budget(&["codes", "--private", "--allow-prompt"]),
+            timeouts.prompt
+        );
+        assert_eq!(
+            budget(&["codes", "--private", "--allow-prompt", "--demo"]),
             timeouts.run
         );
         assert_eq!(
