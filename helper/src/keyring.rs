@@ -18,6 +18,8 @@ const GDBUS_TIMEOUT: Duration = Duration::from_secs(5);
 const SECRETS_PATH_PREFIX: &str = "/org/freedesktop/secrets/";
 const KEY_ID_MAX_LEN: usize = 128;
 
+/// Key provider backed by the Secret Service, via `gdbus` and `secret-tool`
+/// run by absolute path.
 pub struct SecretToolKeys {
     gdbus: PathBuf,
     secret_tool: PathBuf,
@@ -97,10 +99,10 @@ impl KeyProvider for SecretToolKeys {
         if code != 0 {
             return Err(ErrorCode::KeyNotFound);
         }
-        let mut key = Zeroizing::new([0u8; ROOT_KEY_LEN]);
         if out.len() != ROOT_KEY_LEN {
             return Err(ErrorCode::DecryptFailed);
         }
+        let mut key = Zeroizing::new([0u8; ROOT_KEY_LEN]);
         key.copy_from_slice(&out);
         Ok(key)
     }
@@ -158,6 +160,8 @@ fn valid_object_path(path: &str) -> bool {
             && tail
                 .bytes()
                 .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'/'))
+            && !tail.ends_with('/')
+            && !tail.contains("//")
     })
 }
 
@@ -208,7 +212,9 @@ mod tests {
             "([objectpath '/etc/passwd'], @ao [])",
             "([objectpath '/org/freedesktop/secrets/'], @ao [])",
             "([objectpath '/org/freedesktop/secrets/a b'], @ao [])",
-            "([objectpath '/org/freedesktop/secrets/a'", 
+            "([objectpath '/org/freedesktop/secrets/a'",
+            "([objectpath '/org/freedesktop/secrets/a/'], @ao [])",
+            "([objectpath '/org/freedesktop/secrets/a//b'], @ao [])",
             "([objectpath '/org/freedesktop/secrets/a'], [objectpath '/org/freedesktop/secrets/b'])",
         ];
         for text in bad {

@@ -1,8 +1,8 @@
 use std::io::{Read, Write};
+use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -18,11 +18,20 @@ const ALLOWED_ENV: [&str; 4] = [
 ];
 const POLL_INTERVAL: Duration = Duration::from_millis(10);
 
+type Captured = Result<Zeroizing<Vec<u8>>>;
+
 /// Runs `program` by absolute path with a scrubbed environment and returns
 /// its exit code (-1 if killed by a signal) and stdout.
 ///
-/// Stdout is read into a buffer that is allocated once at `max_out + 1`
-/// bytes and never reallocated, so no unzeroized copies are left behind.
+/// The whole call, including waiting for stdout to reach EOF after the child
+/// has exited, is bounded by `timeout`; a descendant that keeps the pipe open
+/// past the deadline yields `Timeout`. Only the direct child is killed: the
+/// child runs in its own process group, but killing the group needs `unsafe`.
+/// Reader and writer threads are never joined, so a lingering descendant
+/// cannot block the caller; the reader drops its zeroizing buffer on exit.
+///
+/// Stdout is read into a buffer allocated once at `max_out + 1` bytes and
+/// never reallocated, so no unzeroized copies are left behind.
 pub fn run_bounded(
     program: &Path,
     args: &[&str],
@@ -30,10 +39,12 @@ pub fn run_bounded(
     max_out: usize,
     timeout: Duration,
 ) -> Result<(i32, Zeroizing<Vec<u8>>)> {
+    let deadline = Instant::now() + timeout;
     let mut command = Command::new(program);
     command
         .args(args)
         .env_clear()
+        .process_group(0)
         .stdin(if stdin.is_some() {
             Stdio::piped()
         } else {
@@ -52,50 +63,66 @@ pub fn run_bounded(
         _ => ErrorCode::Internal,
     })?;
 
-    let stdout = child.stdout.take().ok_or(ErrorCode::Internal)?;
-    let overflow = Arc::new(AtomicBool::new(false));
-    let reader = {
-        let overflow = Arc::clone(&overflow);
-        thread::spawn(move || read_capped(stdout, max_out, &overflow))
-    };
-
-    let writer = match (stdin, child.stdin.take()) {
-        (Some(data), Some(mut pipe)) => {
-            let data = Zeroizing::new(data.to_vec());
-            Some(thread::spawn(move || {
-                let _ = pipe.write_all(&data);
-            }))
-        }
-        _ => None,
-    };
-
-    let outcome = wait_until(&mut child, timeout, &overflow);
-    if outcome.is_err() {
+    let result = drive(&mut child, stdin, max_out, deadline);
+    if result.is_err() {
         let _ = child.kill();
         let _ = child.wait();
     }
-    if let Some(writer) = writer {
-        let _ = writer.join();
-    }
-    let buf = reader.join().map_err(|_| ErrorCode::Internal)?;
-    let code = outcome?;
-
-    if buf.len() > max_out {
-        return Err(ErrorCode::OutputTooLarge);
-    }
-    Ok((code, buf))
+    result
 }
 
-fn wait_until(child: &mut Child, timeout: Duration, overflow: &AtomicBool) -> Result<i32> {
-    let deadline = Instant::now() + timeout;
+fn drive(
+    child: &mut Child,
+    stdin: Option<&[u8]>,
+    max_out: usize,
+    deadline: Instant,
+) -> Result<(i32, Zeroizing<Vec<u8>>)> {
+    let stdout = child.stdout.take().ok_or(ErrorCode::Internal)?;
+    let pipe = child.stdin.take();
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let _ = tx.send(read_capped(stdout, max_out));
+    });
+
+    if let (Some(data), Some(mut pipe)) = (stdin, pipe) {
+        let data = Zeroizing::new(data.to_vec());
+        thread::spawn(move || {
+            let _ = pipe.write_all(&data);
+        });
+    }
+
+    wait_for_both(child, &rx, max_out, deadline)
+}
+
+fn wait_for_both(
+    child: &mut Child,
+    rx: &Receiver<Captured>,
+    max_out: usize,
+    deadline: Instant,
+) -> Result<(i32, Zeroizing<Vec<u8>>)> {
+    let mut exit_code = None;
+    let mut output = None;
     loop {
-        match child.try_wait() {
-            Ok(Some(status)) => return Ok(status.code().unwrap_or(-1)),
-            Ok(None) => {}
-            Err(_) => return Err(ErrorCode::Internal),
+        if exit_code.is_none() {
+            match child.try_wait() {
+                Ok(Some(status)) => exit_code = Some(status.code().unwrap_or(-1)),
+                Ok(None) => {}
+                Err(_) => return Err(ErrorCode::Internal),
+            }
         }
-        if overflow.load(Ordering::Acquire) {
-            return Err(ErrorCode::OutputTooLarge);
+        if output.is_none() {
+            match rx.try_recv() {
+                Ok(Ok(buf)) if buf.len() > max_out => return Err(ErrorCode::OutputTooLarge),
+                Ok(Ok(buf)) => output = Some(buf),
+                Ok(Err(code)) => return Err(code),
+                Err(TryRecvError::Empty) => {}
+                Err(TryRecvError::Disconnected) => return Err(ErrorCode::Internal),
+            }
+        }
+        if let Some(code) = exit_code {
+            if let Some(buf) = output.take() {
+                return Ok((code, buf));
+            }
         }
         if Instant::now() >= deadline {
             return Err(ErrorCode::Timeout);
@@ -104,7 +131,7 @@ fn wait_until(child: &mut Child, timeout: Duration, overflow: &AtomicBool) -> Re
     }
 }
 
-fn read_capped(mut source: impl Read, max_out: usize, overflow: &AtomicBool) -> Zeroizing<Vec<u8>> {
+fn read_capped(mut source: impl Read, max_out: usize) -> Captured {
     let limit = max_out + 1;
     let mut buf = Zeroizing::new(Vec::with_capacity(limit));
     buf.resize(limit, 0);
@@ -114,14 +141,11 @@ fn read_capped(mut source: impl Read, max_out: usize, overflow: &AtomicBool) -> 
             Ok(0) => break,
             Ok(n) => filled += n,
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
-            Err(_) => break,
+            Err(_) => return Err(ErrorCode::Internal),
         }
     }
     buf.truncate(filled);
-    if filled > max_out {
-        overflow.store(true, Ordering::Release);
-    }
-    buf
+    Ok(buf)
 }
 
 #[cfg(test)]
@@ -184,15 +208,13 @@ mod tests {
 
     #[test]
     fn run_bounded_clears_env() {
-        std::env::set_var("FOO", "bar");
         let (code, out) =
             run_bounded(Path::new("/usr/bin/env"), &[], None, 65536, TIMEOUT).unwrap();
         assert_eq!(code, 0);
-        let text = String::from_utf8_lossy(&out);
-        assert!(!text.contains("FOO"));
-        assert!(text
-            .lines()
-            .all(|l| ALLOWED_ENV.iter().any(|a| l.starts_with(&format!("{a}=")))));
+        for line in String::from_utf8_lossy(&out).lines() {
+            let key = line.split('=').next().unwrap();
+            assert!(ALLOWED_ENV.contains(&key), "unexpected env var {key}");
+        }
     }
 
     #[test]
@@ -214,5 +236,33 @@ mod tests {
         let (code, out) = run_bounded(Path::new("/usr/bin/false"), &[], None, 64, TIMEOUT).unwrap();
         assert_eq!(code, 1);
         assert!(out.is_empty());
+    }
+
+    #[test]
+    fn run_bounded_timeout_with_lingering_grandchild() {
+        let start = Instant::now();
+        let r = run_bounded(
+            Path::new("/bin/sh"),
+            &["-c", "sleep 3 & sleep 10"],
+            None,
+            64,
+            Duration::from_millis(200),
+        );
+        assert_eq!(r.unwrap_err(), ErrorCode::Timeout);
+        assert!(start.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn run_bounded_success_does_not_wait_for_grandchild() {
+        let start = Instant::now();
+        let r = run_bounded(
+            Path::new("/bin/sh"),
+            &["-c", "sleep 3 & exit 0"],
+            None,
+            64,
+            Duration::from_millis(500),
+        );
+        assert_eq!(r.unwrap_err(), ErrorCode::Timeout);
+        assert!(start.elapsed() < Duration::from_secs(1));
     }
 }
