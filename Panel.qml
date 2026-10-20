@@ -46,11 +46,11 @@ Panel {
   readonly property var filtered: Model.filterAndOrder(root.entries, root.query, root.prefs, root.recentSnapshot)
   readonly property int selectedIndex: Model.selectionIndex(root.filtered, root.selectedId)
   readonly property var selectedEntry: root.selectedIndex >= 0 ? root.filtered[root.selectedIndex] : null
-  // The pointer may move the highlight, but in privacy mode only a keyboard
-  // move or a click reveals a code.
-  property bool selectedByPointer: false
+  // Whether the selected row was chosen by a keyboard move, Enter or a click.
+  // In privacy mode only such a row is revealed (Model.revealIdFor).
+  property bool selectionChosen: false
   readonly property var wantedRequest: Model.codesRequest(root.privacy,
-    Model.revealIdFor(root.privacy, root.selectedEntry, root.selectedByPointer))
+    Model.revealIdFor(root.privacy, root.selectedEntry, root.selectionChosen))
 
   readonly property var emptyState: Model.emptyState({
     status: root.status,
@@ -105,7 +105,7 @@ Panel {
   function resetView() {
     root.clearSearch()
     root.selectedId = ""
-    root.selectedByPointer = false
+    root.selectionChosen = false
     root.copyGeneration++
     root.copying = false
     root.feedbackId = ""
@@ -172,12 +172,12 @@ Panel {
 
   // Runs in the panel's context, so it may outlive a delegate that the
   // resulting model change destroys.
-  function select(id, byPointer) {
+  function select(id, chosen) {
     if (root.privacy && root.service) {
       var entry = root.filtered[Model.selectionIndex(root.filtered, id)]
-      root.service.hideExcept(Model.revealIdFor(true, entry, byPointer))
+      root.service.hideExcept(Model.revealIdFor(true, entry, chosen))
     }
-    root.selectedByPointer = byPointer
+    root.selectionChosen = chosen
     root.selectedId = id
   }
 
@@ -191,7 +191,7 @@ Panel {
 
   onQueryChanged: {
     root.selectedId = ""
-    root.selectedByPointer = false
+    root.selectionChosen = false
   }
 
   onEntriesChanged: {
@@ -240,7 +240,7 @@ Panel {
   function move(delta) {
     pointerGate.reset()
     var next = Model.moveSelection(root.filtered, root.selectedId, delta)
-    if (next !== "") root.select(next, false)
+    if (next !== "") root.select(next, true)
   }
 
   function runAction(action) {
@@ -276,13 +276,13 @@ Panel {
   onSearchShownChanged: if (!root.searchShown) root.clearSearch()
 
   function activate() {
-    root.selectedByPointer = false
+    root.selectionChosen = true
     if (root.emptyState !== null && root.emptyState.action !== "") root.runAction(root.emptyState.action)
     else root.useEntry(root.selectedEntry)
   }
 
   function clickEntry(id) {
-    root.select(id, false)
+    root.select(id, true)
     root.useEntry(root.selectedEntry)
   }
 
@@ -446,7 +446,7 @@ Panel {
           urgentColor: root.urgent
           fontFamily: root.fontFamily
           onPointerMoved: function(row, mouse) {
-            if (pointerGate.moved(row, mouse)) root.select(modelData.id, true)
+            if (pointerGate.moved(row, mouse)) root.select(modelData.id, false)
           }
           onClicked: root.clickEntry(modelData.id)
         }

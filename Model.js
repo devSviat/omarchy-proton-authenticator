@@ -45,6 +45,26 @@ function failure(error) {
   return { ok: false, error: error }
 }
 
+// install.sh is the only thing that rebuilds the helper, so after
+// `omarchy plugin update` an older binary may still speak the same protocol.
+// Only the exact manifest version counts as current.
+function versionStatus(reply, expected) {
+  if (!reply || reply.ok !== true)
+    return reply && typeof reply.error === "string" && reply.error !== "" ? reply.error : "INTERNAL"
+  var current = typeof reply.version === "string" && typeof expected === "string"
+    && expected !== "" && reply.version === expected
+  return current ? "READY" : "HELPER_OUTDATED"
+}
+
+// versionStatus is "" until the helper's version is known; a READY check
+// does not count before that, so no codes load from an unverified helper.
+function serviceStatus(versionStatus, codesError, checkStatus) {
+  if (versionStatus !== "" && versionStatus !== "READY") return versionStatus
+  if (codesError !== "") return codesError
+  if (versionStatus === "" && checkStatus === "READY") return "LOADING"
+  return checkStatus
+}
+
 // No output at all means the helper died before replying. A reply that does
 // not parse, or speaks another protocol, comes from a helper built from a
 // different checkout.
@@ -134,7 +154,7 @@ var STATUS_TEXT = {
   DEPENDENCY_MISSING: "A required tool is missing; run install.sh",
   MEMLOCK_FAILED: "The helper could not lock its memory (ulimit -l)",
   TIMEOUT: "The helper timed out",
-  OUTPUT_TOO_LARGE: "The helper reply was too large",
+  OUTPUT_TOO_LARGE: "More than 1000 accounts; the plugin reads at most 1000",
   HELPER_MISSING: "Helper not built; run install.sh",
   HELPER_OUTDATED: "Helper is out of date; run install.sh"
 }
@@ -432,6 +452,8 @@ function emptyState(s) {
     return state("Vault format not recognised \u2014 the app may have updated", "", "openProton", OPEN_PROTON)
   case "APP_LOCKED":
     return state("App lock is on \u2014 this plugin can't read a password-locked vault")
+  case "OUTPUT_TOO_LARGE":
+    return state("More than 1000 accounts \u2014 the plugin reads at most 1000", "", "openProton", OPEN_PROTON)
   case "UNSAFE_KEY_STORAGE":
     return state("Proton is storing its key outside the keyring \u2014 open Proton and fix keyring access",
                  "", "openProton", OPEN_PROTON)
@@ -466,7 +488,7 @@ var SHORT_STATUS = {
   DEPENDENCY_MISSING: "Dependency missing",
   MEMLOCK_FAILED: "Memlock failed",
   TIMEOUT: "Timed out",
-  OUTPUT_TOO_LARGE: "Reply too large",
+  OUTPUT_TOO_LARGE: "Too many accounts",
   HELPER_MISSING: "Helper missing",
   HELPER_OUTDATED: "Helper outdated",
   ITEM_NOT_FOUND: "Account not found"
@@ -525,10 +547,12 @@ function reloadAfterCheck(c) {
   return c.codesFailed || c.mtimeChanged || (!c.wasReady && !c.codesFresh)
 }
 
-// Privacy mode reveals only a row chosen by keyboard or click: a pointer
-// resting on a row while the screen is shared must not expose its code.
-function revealIdFor(privacy, entry, byPointer) {
-  if (!privacy || !entry || byPointer) return ""
+// Privacy mode reveals only a row the user chose with a keyboard move, Enter
+// or a click. The first row, selected by default, and a row under a resting
+// pointer stay hidden, so opening the panel while the screen is shared
+// exposes no code.
+function revealIdFor(privacy, entry, chosen) {
+  if (!privacy || !entry || chosen !== true) return ""
   return entry.id
 }
 
@@ -641,7 +665,7 @@ brand("\u{F0611}", ["wechat"])
 
 // Brand keys that are also common words; they match only the whole issuer,
 // so "Live Nation" or "Steam Plumbing" get no brand.
-var NO_FALLBACK = ["live", "medium", "notion", "steam", "line", "apple", "amazon", "uber", "slack", "signal"]
+var NO_FALLBACK = ["live", "medium", "notion", "steam", "apple", "amazon", "uber", "slack"]
 
 // "Git Hub", "github.com" and "accounts.google.com" become "github" and
 // "google"; a parenthetical like "(work)" is dropped. The first word is a

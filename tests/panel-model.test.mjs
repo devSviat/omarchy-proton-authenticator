@@ -144,6 +144,8 @@ test("emptyState maps every status", () => {
   assert.equal(s("LOADING").title, "Loading…")
   assert.equal(s("READY", { entryCount: 3 }).title, "No matches")
   assert.equal(s("READY", { entryCount: 3, matchCount: 3 }), null)
+  assert.equal(s("OUTPUT_TOO_LARGE").title, "More than 1000 accounts \u2014 the plugin reads at most 1000")
+  assert.equal(s("OUTPUT_TOO_LARGE").action, "openProton")
   assert.equal(s("TIMEOUT").title, M.statusText("TIMEOUT"))
   assert.equal(s("TIMEOUT").action, "retry")
 })
@@ -229,13 +231,25 @@ test("reloadAfterCheck skips the reload right after a successful unlock", () => 
   assert.equal(c({ panelOpen: false, mtimeChanged: true }), false)
 })
 
-test("revealIdFor ignores pointer selection in privacy mode", () => {
+test("revealIdFor reveals only a row the user chose", () => {
   const e = { id: "a" }
-  assert.equal(M.revealIdFor(true, e, false), "a")
-  assert.equal(M.revealIdFor(true, e, true), "")
-  assert.equal(M.revealIdFor(false, e, false), "")
+  assert.equal(M.revealIdFor(true, e, true), "a")
+  assert.equal(M.revealIdFor(true, e, false), "")
+  assert.equal(M.revealIdFor(true, e, undefined), "")
   assert.equal(M.revealIdFor(false, e, true), "")
-  assert.equal(M.revealIdFor(true, null, false), "")
+  assert.equal(M.revealIdFor(false, e, false), "")
+  assert.equal(M.revealIdFor(true, null, true), "")
+})
+
+test("privacy mode reveals nothing on open until a row is chosen", () => {
+  const rows = [hidden("a"), hidden("b")]
+  const at = (selectedId, chosen) => {
+    const entry = rows[M.selectionIndex(rows, selectedId)]
+    return M.codesRequest(true, M.revealIdFor(true, entry, chosen))
+  }
+  assert.deepEqual(plain(at("", false)), { privateMode: true, revealId: "" })
+  assert.deepEqual(plain(at(M.moveSelection(rows, "", 1), true)), { privateMode: true, revealId: "b" })
+  assert.deepEqual(plain(at("a", true)), { privateMode: true, revealId: "a" })
 })
 
 test("issuerGlyph normalizes case, spacing, punctuation and domains", () => {
@@ -261,6 +275,10 @@ test("issuerGlyph returns empty for unknown and prototype-like issuers", () => {
   for (const name of ["Hetzner", "Tailscale", "Proton", "", null, undefined, "constructor", "__proto__", "toString", "hasOwnProperty"])
     assert.equal(M.issuerGlyph(name), "", String(name))
   assert.equal(M.issuerGlyph("Gitea (home) server"), M.issuerGlyph("gitea"))
+})
+
+test("NO_FALLBACK only lists keys that have a glyph", () => {
+  for (const key of M.NO_FALLBACK) assert.equal(typeof M.ISSUER_GLYPHS[key], "string", key)
 })
 
 test("issuerGlyph never falls back to short or common-word keys", () => {
@@ -330,4 +348,26 @@ test("search ties follow the snapshot, not the live recent list", () => {
   const ids = (list) => plain(list.map((e) => e.id))
   assert.deepEqual(ids(M.filterAndOrder(entries, "g", M.withRecent(M.emptyPrefs(), "b"), [])), ["a", "b"])
   assert.deepEqual(ids(M.filterAndOrder(entries, "g", M.emptyPrefs(), ["b"])), ["b", "a"])
+})
+
+test("versionStatus accepts only the manifest's version", () => {
+  const ok = (version) => ({ ok: true, protocol: 1, version })
+  assert.equal(M.versionStatus(ok("0.1.0"), "0.1.0"), "READY")
+  assert.equal(M.versionStatus(ok("0.0.9"), "0.1.0"), "HELPER_OUTDATED")
+  assert.equal(M.versionStatus(ok("0.1.0"), ""), "HELPER_OUTDATED")
+  assert.equal(M.versionStatus(ok("0.1.0"), undefined), "HELPER_OUTDATED")
+  assert.equal(M.versionStatus(ok(1), "1"), "HELPER_OUTDATED")
+  assert.equal(M.versionStatus({ ok: true, protocol: 1 }, "0.1.0"), "HELPER_OUTDATED")
+  assert.equal(M.versionStatus(M.failure("HELPER_MISSING"), "0.1.0"), "HELPER_MISSING")
+  assert.equal(M.versionStatus(M.failure("MEMLOCK_FAILED"), "0.1.0"), "MEMLOCK_FAILED")
+  assert.equal(M.versionStatus(null, "0.1.0"), "INTERNAL")
+})
+
+test("serviceStatus puts a helper problem first", () => {
+  assert.equal(M.serviceStatus("HELPER_OUTDATED", "KEYRING_LOCKED", "READY"), "HELPER_OUTDATED")
+  assert.equal(M.serviceStatus("HELPER_MISSING", "", "READY"), "HELPER_MISSING")
+  assert.equal(M.serviceStatus("READY", "KEYRING_LOCKED", "READY"), "KEYRING_LOCKED")
+  assert.equal(M.serviceStatus("READY", "", "VAULT_BUSY"), "VAULT_BUSY")
+  assert.equal(M.serviceStatus("", "", "LOADING"), "LOADING")
+  assert.equal(M.serviceStatus("", "", "READY"), "LOADING")
 })

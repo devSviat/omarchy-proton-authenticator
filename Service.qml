@@ -5,8 +5,8 @@ import "Model.js" as Model
 
 // The single owner of plugin state and the only place that runs pa-helper.
 //
-// Bar widgets exist once per monitor and indicators twice over, so they only
-// read these properties and call these functions.
+// Bar widgets exist once per monitor, so they only read these properties and
+// call these functions.
 Item {
   id: root
 
@@ -20,11 +20,15 @@ Item {
   // Fake accounts from public RFC seeds; never touches the vault or keyring.
   property bool demo: false
 
-  // "LOADING" | "READY" | an error code. A failed codes call outranks the
-  // last check, so the panel shows why it has no codes.
+  // "LOADING" | "READY" | an error code. A stale or missing helper outranks
+  // everything, and a failed codes call outranks the last check, so the
+  // panel shows why it has no codes.
   property string status: "LOADING"
   property string checkStatus: "LOADING"
   property string codesError: ""
+  // "" until `pa-helper version` has answered for the current manifest.
+  property string versionStatus: ""
+  property bool versionRunning: false
 
   // Codes live here only while a panel is open.
   property var entries: []
@@ -87,8 +91,36 @@ Item {
   }
 
   function applyStatus() {
-    root.status = root.codesError !== "" ? root.codesError : root.checkStatus
+    root.status = Model.serviceStatus(root.versionStatus, root.codesError, root.checkStatus)
     root.changed()
+  }
+
+  // The manifest arrives after creation, and again after a rescan such as
+  // `omarchy plugin update`.
+  onManifestChanged: {
+    root.versionStatus = ""
+    root.clearCodes()
+    root.checkVersion()
+  }
+
+  function checkVersion() {
+    if (root.versionRunning || root.promptRunning || !root.manifest) return
+    var expected = String(root.manifest.version || "")
+    root.versionRunning = true
+    helper.call(["version"], "", function(reply) {
+      root.versionRunning = false
+      if (!root.manifest || String(root.manifest.version || "") !== expected) {
+        root.checkVersion()
+        return
+      }
+      root.versionStatus = Model.versionStatus(reply, expected)
+      if (root.versionStatus === "READY") {
+        root.applyStatus()
+        root.refreshStatus()
+      } else {
+        root.clearCodes()
+      }
+    })
   }
 
   function panelOpened(owner) {
@@ -105,6 +137,10 @@ Item {
   }
 
   function refreshStatus() {
+    if (root.versionStatus !== "READY") {
+      root.checkVersion()
+      return
+    }
     if (root.promptRunning || root.checkRunning) return
     root.checkRunning = true
     helper.call(root.withDemo(["check"]), "", function(reply) {
@@ -116,6 +152,9 @@ Item {
         root.vaultMtime = typeof reply.vaultMtime === "number" ? reply.vaultMtime : 0
       } else {
         root.checkStatus = reply.error
+        // The binary went away or changed under us: verify it again before
+        // trusting another READY.
+        if (reply.error === "HELPER_MISSING" || reply.error === "HELPER_OUTDATED") root.versionStatus = ""
       }
       var codesFailed = root.codesError !== ""
       // A locked keyring or a broken vault must not leave old codes on screen.
@@ -162,7 +201,7 @@ Item {
   }
 
   function runCodes(req, allowPrompt) {
-    if (!root.panelOpen) return
+    if (!root.panelOpen || root.versionStatus !== "READY") return
     var args = Model.codesArgs(req)
     if (allowPrompt) args.push("--allow-prompt")
     var generation = root.codesGeneration
@@ -245,7 +284,7 @@ Item {
   // background to clear the clipboard later.
   function copy(id, clearAfterSeconds, onDone) {
     var done = typeof onDone === "function" ? onDone : function() {}
-    if (!Model.validId(id) || root.promptRunning) {
+    if (!Model.validId(id) || root.promptRunning || root.versionStatus !== "READY") {
       done(false)
       return
     }

@@ -157,6 +157,7 @@ test("groupCode splits by length", () => {
 
 test("isUrgent at 5 seconds or less", () => {
   assert.equal(M.isUrgent(5), true)
+  assert.equal(M.isUrgent(0), true)
   assert.equal(M.isUrgent(6), false)
   assert.equal(M.isUrgent(null), false)
 })
