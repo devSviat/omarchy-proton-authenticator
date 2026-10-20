@@ -131,9 +131,12 @@ Panel {
 
   // Switching privacy reloads at once (turning it on must drop codes now);
   // walking the list only reveals the row the selection settles on.
+  // Dropping codes here would change entries while wantedRequest is still
+  // being notified, so other selection paths drop them on the next turn;
+  // select() drops them before the selection even moves.
   function reconcile() {
     if (root.opened && root.service && root.wantedRequest.privateMode)
-      root.service.hideExcept(root.wantedRequest.revealId)
+      Qt.callLater(root.hideUnwanted)
     var decision = root.decide("change")
     if (decision === "debounce") {
       revealDebounce.restart()
@@ -141,6 +144,22 @@ Panel {
     }
     revealDebounce.stop()
     if (decision === "now") root.service.loadCodes(root.wantedRequest)
+  }
+
+  function hideUnwanted() {
+    if (root.opened && root.service && root.wantedRequest.privateMode)
+      root.service.hideExcept(root.wantedRequest.revealId)
+  }
+
+  // Runs in the panel's context, so it may outlive a delegate that the
+  // resulting model change destroys.
+  function select(id, byPointer) {
+    if (root.privacy && root.service) {
+      var entry = root.filtered[Model.selectionIndex(root.filtered, id)]
+      root.service.hideExcept(Model.revealIdFor(true, entry, byPointer))
+    }
+    root.selectedByPointer = byPointer
+    root.selectedId = id
   }
 
   function revealNow() {
@@ -201,9 +220,8 @@ Panel {
 
   function move(delta) {
     pointerGate.reset()
-    root.selectedByPointer = false
     var next = Model.moveSelection(root.filtered, root.selectedId, delta)
-    if (next !== "") root.selectedId = next
+    if (next !== "") root.select(next, false)
   }
 
   function runAction(action) {
@@ -222,6 +240,11 @@ Panel {
     root.selectedByPointer = false
     if (root.emptyState !== null && root.emptyState.action !== "") root.runAction(root.emptyState.action)
     else root.useEntry(root.selectedEntry)
+  }
+
+  function clickEntry(id) {
+    root.select(id, false)
+    root.useEntry(root.selectedEntry)
   }
 
   // A row still hidden by privacy mode is revealed first, never copied blind.
@@ -379,15 +402,9 @@ Panel {
           urgentColor: root.urgent
           fontFamily: root.fontFamily
           onPointerMoved: function(row, mouse) {
-            if (!pointerGate.moved(row, mouse)) return
-            root.selectedByPointer = true
-            root.selectedId = modelData.id
+            if (pointerGate.moved(row, mouse)) root.select(modelData.id, true)
           }
-          onClicked: {
-            root.selectedByPointer = false
-            root.selectedId = modelData.id
-            root.useEntry(modelData)
-          }
+          onClicked: root.clickEntry(modelData.id)
         }
       }
 
