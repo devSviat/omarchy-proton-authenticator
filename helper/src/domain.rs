@@ -77,6 +77,56 @@ pub struct EntryView {
     pub remaining: u64,
 }
 
+/// An entry listed without its code, for privacy mode. The code fields are
+/// unit-typed, so they always serialize as `null` and can never carry a code.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HiddenEntry {
+    pub id: String,
+    pub issuer: String,
+    pub account: String,
+    kind: (),
+    code: (),
+    next_code: (),
+    period: (),
+    digits: (),
+    remaining: (),
+}
+
+impl HiddenEntry {
+    pub fn new(id: String, issuer: &str, account: &str) -> Self {
+        Self {
+            id,
+            issuer: truncate_label(issuer),
+            account: truncate_label(account),
+            kind: (),
+            code: (),
+            next_code: (),
+            period: (),
+            digits: (),
+            remaining: (),
+        }
+    }
+}
+
+/// One row of `codes --private`: the revealed entry in full, every other one
+/// hidden. Both variants serialize with the same keys.
+#[derive(Debug, Serialize)]
+#[serde(untagged)]
+pub enum PrivateEntry {
+    Revealed(EntryView),
+    Hidden(HiddenEntry),
+}
+
+impl PrivateEntry {
+    pub fn labels(&self) -> (&str, &str) {
+        match self {
+            Self::Revealed(v) => (&v.issuer, &v.account),
+            Self::Hidden(h) => (&h.issuer, &h.account),
+        }
+    }
+}
+
 fn unsupported(id: String, issuer: String, account: String) -> Entry {
     Entry {
         id,
@@ -278,6 +328,27 @@ mod tests {
         let json = serde_json::to_string(&view(&e, 1000)).unwrap();
         assert!(!json.contains(B32));
         assert!(!json.to_lowercase().contains("secret"));
+    }
+
+    #[test]
+    fn hidden_entry_has_view_keys_and_null_codes() {
+        let hidden = serde_json::to_value(PrivateEntry::Hidden(HiddenEntry::new(
+            "id".into(),
+            &"é".repeat(300),
+            "me",
+        )))
+        .unwrap();
+        let full = serde_json::to_value(view(&totp_entry(None), 1000)).unwrap();
+        let keys = |v: &serde_json::Value| {
+            let mut k: Vec<String> = v.as_object().unwrap().keys().cloned().collect();
+            k.sort();
+            k
+        };
+        assert_eq!(keys(&hidden), keys(&full));
+        for field in ["kind", "code", "nextCode", "period", "digits", "remaining"] {
+            assert!(hidden[field].is_null(), "{field}");
+        }
+        assert_eq!(hidden["issuer"].as_str().unwrap().chars().count(), 256);
     }
 
     #[test]

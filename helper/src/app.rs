@@ -4,7 +4,7 @@ use std::path::Path;
 use zeroize::Zeroizing;
 
 use crate::crypto::{derive_storage_key, ItemCipher};
-use crate::domain::{build_entry, view, EntryView, ItemPlaintext};
+use crate::domain::{build_entry, view, EntryView, HiddenEntry, ItemPlaintext, PrivateEntry};
 use crate::error::{ErrorCode, Result};
 use crate::vault::{EncryptedItem, Snapshot, StorageKeyRef, VaultSource};
 
@@ -33,6 +33,13 @@ pub trait KeyProvider {
 #[derive(Debug)]
 pub struct CodesRequest {
     pub only: Option<String>,
+    pub allow_prompt: bool,
+    pub unix: u64,
+}
+
+#[derive(Debug)]
+pub struct PrivateRequest {
+    pub reveal: Option<String>,
     pub allow_prompt: bool,
     pub unix: u64,
 }
@@ -105,6 +112,13 @@ pub fn sort_entries(views: &mut [EntryView]) {
     views.sort_by_cached_key(|v| (v.issuer.to_lowercase(), v.account.to_lowercase()));
 }
 
+pub fn sort_private(entries: &mut [PrivateEntry]) {
+    entries.sort_by_cached_key(|e| {
+        let (issuer, account) = e.labels();
+        (issuer.to_lowercase(), account.to_lowercase())
+    });
+}
+
 pub struct CheckReport {
     pub status: Result<()>,
     pub vault_mtime: Option<u64>,
@@ -159,6 +173,72 @@ pub fn copy_code(mut view: EntryView) -> Result<Zeroizing<String>> {
         .ok_or(ErrorCode::InvalidArgument)
 }
 
+/// Opens the keyring item and returns the cipher for the vault's items.
+/// Without `allow_prompt` a locked keyring fails instead of prompting.
+fn item_cipher(
+    keys: &dyn KeyProvider,
+    key_ref: &StorageKeyRef,
+    allow_prompt: bool,
+) -> Result<ItemCipher> {
+    let key_id = keyring_id(key_ref);
+    if !allow_prompt {
+        require_unlocked(keys, key_id)?;
+    }
+    let root = keys.root_key(key_id)?;
+    let storage_key = derive_storage_key(&root, &key_ref.salt)?;
+    drop(root);
+    Ok(ItemCipher::new(&storage_key))
+}
+
+/// Every entry with its labels only, except `req.reveal`, which is computed
+/// in full. Labels are the vault's cleartext fields, so without `reveal`
+/// neither the keyring nor any ciphertext is touched; with it, only that item
+/// is decrypted.
+pub fn codes_private(
+    vault: &dyn VaultSource,
+    keys: &dyn KeyProvider,
+    req: &PrivateRequest,
+) -> Result<Vec<PrivateEntry>> {
+    let snapshot = vault.snapshot()?;
+    let key_ref = usable_key_ref(&*snapshot)?;
+
+    let revealed = |item: &EncryptedItem| req.reveal.as_ref() == Some(&item.id);
+    let mut entries = Vec::new();
+    let mut found = false;
+    snapshot.for_each_item(&mut |item| {
+        if !valid_item_id(&item.id) {
+            return Err(ErrorCode::VaultFormatChanged);
+        }
+        if revealed(&item) {
+            found = true;
+        } else {
+            entries.push(PrivateEntry::Hidden(HiddenEntry::new(
+                item.id,
+                &item.issuer,
+                &item.name,
+            )));
+        }
+        Ok(())
+    })?;
+    if req.reveal.is_some() && !found {
+        return Err(ErrorCode::ItemNotFound);
+    }
+
+    if found {
+        let cipher = item_cipher(keys, &key_ref, req.allow_prompt)?;
+        snapshot.for_each_item(&mut |item| {
+            if revealed(&item) {
+                entries.push(PrivateEntry::Revealed(decode_view(
+                    &cipher, item, req.unix,
+                )?));
+            }
+            Ok(())
+        })?;
+    }
+    sort_private(&mut entries);
+    Ok(entries)
+}
+
 pub fn codes(
     vault: &dyn VaultSource,
     keys: &dyn KeyProvider,
@@ -166,7 +246,6 @@ pub fn codes(
 ) -> Result<Vec<EntryView>> {
     let snapshot = vault.snapshot()?;
     let key_ref = usable_key_ref(&*snapshot)?;
-    let key_id = keyring_id(&key_ref);
 
     let wanted = |item: &EncryptedItem| req.only.as_ref().is_none_or(|only| *only == item.id);
     // The snapshot is walked twice: ids are validated before the keyring is
@@ -187,16 +266,7 @@ pub fn codes(
         };
     }
 
-    if !req.allow_prompt {
-        require_unlocked(keys, key_id)?;
-    }
-
-    let root = keys.root_key(key_id)?;
-    let storage_key = derive_storage_key(&root, &key_ref.salt)?;
-    drop(root);
-    let cipher = ItemCipher::new(&storage_key);
-    drop(storage_key);
-
+    let cipher = item_cipher(keys, &key_ref, req.allow_prompt)?;
     let mut views = Vec::with_capacity(matching);
     snapshot.for_each_item(&mut |item| {
         if wanted(&item) {

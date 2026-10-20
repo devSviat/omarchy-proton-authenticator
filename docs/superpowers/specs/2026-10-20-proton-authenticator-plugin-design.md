@@ -79,6 +79,7 @@ Each command prints exactly one JSON line, bounded in size, in an envelope `{"ok
 - `version` → helper version and protocol number.
 - `check [--demo]` → `status` (`READY` or an error code) and `vaultMtime`, without decrypting anything and without ever opening a keyring prompt. It also verifies that `wl-copy` and `secret-tool` are available.
 - `codes [--only <id>] [--allow-prompt] [--demo]` → `now` and `entries` (`id`, `issuer`, `account`, `kind`, `code`, `nextCode`, `period`, `digits`, `remaining`). The output type has no field that could hold a secret.
+- `codes --private [--reveal <id>] [--allow-prompt] [--demo]` → the same reply shape, but every entry has only `id`, `issuer` and `account` set; the other fields are present and `null`. The `--reveal` entry, if given, is computed in full. Without `--reveal` the keyring is not touched and nothing is decrypted (labels are cleartext in the vault); with it, only that item is decrypted, under the same lock rules as `codes`. `--reveal` requires `--private`, `--private` excludes `--only`, and an unknown reveal id is `ITEM_NOT_FOUND`.
 - `copy <id> [--clear-after <5..120>] [--demo]` → the helper computes the code itself (the next one if fewer than 5 s remain), hands it to `wl-copy --foreground --sensitive --type text/plain` via stdin, replies, detaches, and keeps `wl-copy` alive until the deadline. If `wl-copy` is still the clipboard owner at the deadline, the helper kills it and runs `wl-copy --clear`. If the user copied something else in the meantime, `wl-copy` has already exited and nothing is cleared. No copy or hash of the code is kept.
 - `prefs get` / `prefs set` → pinned and recent ids plus the privacy flag (see "Stored state").
 - Error codes include `VAULT_NOT_FOUND`, `VAULT_BUSY`, `VAULT_FORMAT_CHANGED`, `KEYRING_LOCKED`, `KEYRING_UNAVAILABLE`, `KEY_NOT_FOUND`, `DECRYPT_FAILED`, `APP_LOCKED`, `UNSAFE_KEY_STORAGE`, `DEPENDENCY_MISSING`, `ITEM_NOT_FOUND`, `INVALID_ARGUMENT`, `MEMLOCK_FAILED`, `TIMEOUT`, `OUTPUT_TOO_LARGE`, `INTERNAL`.
@@ -115,7 +116,7 @@ Each command prints exactly one JSON line, bounded in size, in an envelope `{"ok
 - Codes stay in the model only while the panel is open. Closing the panel clears the model and stops helper calls.
 - No `console.log` of data and no notifications with account names.
 - Copying is done by the helper (`copy <id>`). QML never runs `wl-copy` with a code.
-- Privacy mode (Ctrl+H): only the selected row shows its code, and hidden codes are never loaded into QML (`codes --only <id>`).
+- Privacy mode (Ctrl+H): only the selected row shows its code, and hidden codes are never loaded into QML. The panel lists and searches rows from `codes --private` and fetches the selected row's code with `codes --private --reveal <id>`.
 
 ## Project architecture
 

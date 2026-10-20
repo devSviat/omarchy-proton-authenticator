@@ -6,9 +6,11 @@ use std::path::Path;
 use aes_gcm::aead::{Aead, Payload};
 use aes_gcm::{Aes256Gcm, KeyInit};
 use hkdf::Hkdf;
-use pa_helper::app::{check, codes, copy_code, CodesRequest, KeyProvider, LockState};
+use pa_helper::app::{
+    check, codes, codes_private, copy_code, CodesRequest, KeyProvider, LockState, PrivateRequest,
+};
 use pa_helper::base32::base32_decode;
-use pa_helper::domain::EntryView;
+use pa_helper::domain::{EntryView, PrivateEntry};
 use pa_helper::error::{ErrorCode, Result};
 use pa_helper::otp::{steam, totp, Algorithm};
 use pa_helper::ssv::Value;
@@ -126,6 +128,7 @@ struct FakeKeys {
     state: LockState,
     root: [u8; 32],
     root_calls: Cell<u32>,
+    lock_calls: Cell<u32>,
     last_key_id: std::cell::RefCell<String>,
 }
 
@@ -135,6 +138,7 @@ impl FakeKeys {
             state,
             root: ROOT,
             root_calls: Cell::new(0),
+            lock_calls: Cell::new(0),
             last_key_id: Default::default(),
         }
     }
@@ -142,6 +146,7 @@ impl FakeKeys {
 
 impl KeyProvider for FakeKeys {
     fn lock_state(&self, _key_id: &str) -> Result<LockState> {
+        self.lock_calls.set(self.lock_calls.get() + 1);
         Ok(self.state)
     }
 
@@ -549,4 +554,199 @@ fn copy_code_switches_to_next_near_the_boundary() {
         copy_code(view_with(None, None, 0)).unwrap_err(),
         ErrorCode::InvalidArgument
     );
+}
+
+fn private_req(reveal: Option<&str>, allow_prompt: bool) -> PrivateRequest {
+    PrivateRequest {
+        reveal: reveal.map(str::to_string),
+        allow_prompt,
+        unix: UNIX,
+    }
+}
+
+fn private_json(entries: &[PrivateEntry]) -> Vec<serde_json::Value> {
+    entries
+        .iter()
+        .map(|e| serde_json::to_value(e).unwrap())
+        .collect()
+}
+
+const CODE_FIELDS: [&str; 6] = ["kind", "code", "nextCode", "period", "digits", "remaining"];
+
+fn assert_hidden(entry: &serde_json::Value) {
+    let map = entry.as_object().unwrap();
+    assert_eq!(map.len(), 9, "{entry}");
+    for field in CODE_FIELDS {
+        assert!(map[field].is_null(), "{field} in {entry}");
+    }
+}
+
+#[test]
+fn private_without_reveal_never_touches_the_keyring() {
+    for state in [LockState::Locked, LockState::Missing, LockState::Unlocked] {
+        let tmp = TempDir::new().unwrap();
+        let vault = standard(tmp.path());
+        let keys = FakeKeys::new(state);
+        for allow_prompt in [false, true] {
+            let entries = codes_private(&vault, &keys, &private_req(None, allow_prompt)).unwrap();
+            let json = private_json(&entries);
+            assert_eq!(json.len(), 2);
+            assert_eq!(json[0]["id"], "t1");
+            assert_eq!(json[0]["issuer"], "GitHub");
+            assert_eq!(json[0]["account"], "me@example.com");
+            assert_eq!(json[1]["id"], "s1");
+            assert_eq!(json[1]["issuer"], "Steam");
+            assert_eq!(json[1]["account"], "gamer");
+            json.iter().for_each(assert_hidden);
+        }
+        assert_eq!(keys.lock_calls.get(), 0);
+        assert_eq!(keys.root_calls.get(), 0);
+    }
+}
+
+#[test]
+fn private_without_reveal_decrypts_nothing() {
+    let tmp = TempDir::new().unwrap();
+    let vault = vault_with(
+        tmp.path(),
+        &key_ref(Some("a"), &SALT, 0),
+        &[
+            totp_item("good", "GitHub", "me"),
+            item("bad", "X", "y", 2, vec![0; 40]),
+        ],
+    );
+    let keys = FakeKeys::new(LockState::Unlocked);
+    let entries = codes_private(&vault, &keys, &private_req(None, false)).unwrap();
+    assert_eq!(entries.len(), 2);
+    private_json(&entries).iter().for_each(assert_hidden);
+}
+
+#[test]
+fn private_reveal_computes_only_that_entry() {
+    let tmp = TempDir::new().unwrap();
+    let keys = FakeKeys::new(LockState::Unlocked);
+    let entries = codes_private(
+        &standard(tmp.path()),
+        &keys,
+        &private_req(Some("t1"), false),
+    )
+    .unwrap();
+    let json = private_json(&entries);
+    let key = base32_decode(SECRET).unwrap();
+    assert_eq!(json.len(), 2);
+    assert_eq!(json[0]["id"], "t1");
+    assert_eq!(json[0]["kind"], "totp");
+    assert_eq!(json[0]["code"], totp(&key, UNIX, 30, Algorithm::Sha1, 6));
+    assert_eq!(
+        json[0]["nextCode"],
+        totp(&key, UNIX + 30, 30, Algorithm::Sha1, 6)
+    );
+    assert_eq!(json[0]["period"], 30);
+    assert_eq!(json[0]["digits"], 6);
+    assert_eq!(json[0]["remaining"], 30 - UNIX % 30);
+    assert_eq!(json[1]["id"], "s1");
+    assert_hidden(&json[1]);
+    assert_eq!(keys.root_calls.get(), 1);
+    assert_eq!(keys.lock_calls.get(), 1);
+}
+
+#[test]
+fn private_reveal_decrypts_only_the_revealed_item() {
+    let tmp = TempDir::new().unwrap();
+    let vault = vault_with(
+        tmp.path(),
+        &key_ref(Some("a"), &SALT, 0),
+        &[
+            totp_item("good", "GitHub", "me"),
+            item("bad", "X", "y", 2, vec![0; 40]),
+        ],
+    );
+    let keys = FakeKeys::new(LockState::Unlocked);
+    let entries = codes_private(&vault, &keys, &private_req(Some("good"), false)).unwrap();
+    let json = private_json(&entries);
+    assert_eq!(json[0]["id"], "good");
+    assert!(json[0]["code"].is_string());
+    assert_hidden(&json[1]);
+}
+
+#[test]
+fn private_reveal_unknown_is_item_not_found() {
+    let tmp = TempDir::new().unwrap();
+    let keys = FakeKeys::new(LockState::Unlocked);
+    let err = codes_private(
+        &standard(tmp.path()),
+        &keys,
+        &private_req(Some("nope"), false),
+    )
+    .unwrap_err();
+    assert_eq!(err, ErrorCode::ItemNotFound);
+    assert_eq!(keys.lock_calls.get(), 0);
+    assert_eq!(keys.root_calls.get(), 0);
+}
+
+#[test]
+fn private_reveal_follows_the_lock_rules() {
+    let tmp = TempDir::new().unwrap();
+    let vault = standard(tmp.path());
+    let keys = FakeKeys::new(LockState::Locked);
+    let err = codes_private(&vault, &keys, &private_req(Some("t1"), false)).unwrap_err();
+    assert_eq!(err, ErrorCode::KeyringLocked);
+    assert_eq!(keys.root_calls.get(), 0);
+
+    let keys = FakeKeys::new(LockState::Missing);
+    let err = codes_private(&vault, &keys, &private_req(Some("t1"), false)).unwrap_err();
+    assert_eq!(err, ErrorCode::KeyNotFound);
+
+    let keys = FakeKeys::new(LockState::Locked);
+    let entries = codes_private(&vault, &keys, &private_req(Some("t1"), true)).unwrap();
+    assert!(serde_json::to_value(&entries[0]).unwrap()["code"].is_string());
+    assert_eq!(keys.lock_calls.get(), 0);
+    assert_eq!(keys.root_calls.get(), 1);
+}
+
+#[test]
+fn private_keeps_the_vault_checks() {
+    let tmp = TempDir::new().unwrap();
+    let vault = vault_with(
+        tmp.path(),
+        &key_ref(Some("a"), &SALT, 0),
+        &[totp_item("ok", "GitHub", "me"), totp_item("-bad", "X", "y")],
+    );
+    let keys = FakeKeys::new(LockState::Unlocked);
+    let err = codes_private(&vault, &keys, &private_req(None, false)).unwrap_err();
+    assert_eq!(err, ErrorCode::VaultFormatChanged);
+
+    let tmp = TempDir::new().unwrap();
+    let vault = vault_with(
+        tmp.path(),
+        &key_ref(Some("a"), &SALT, 1),
+        &[totp_item("ok", "GitHub", "me")],
+    );
+    let err = codes_private(&vault, &keys, &private_req(None, false)).unwrap_err();
+    assert_eq!(err, ErrorCode::AppLocked);
+    assert_eq!(keys.lock_calls.get() + keys.root_calls.get(), 0);
+}
+
+#[test]
+fn private_sorts_and_truncates_like_codes() {
+    let tmp = TempDir::new().unwrap();
+    let long = "é".repeat(300);
+    let vault = vault_with(
+        tmp.path(),
+        &key_ref(Some("a"), &SALT, 0),
+        &[
+            totp_item("1", "github", "zed"),
+            totp_item("2", "Amazon", "bob"),
+            totp_item("3", "GitHub", "Alice"),
+            totp_item("4", "amazon", "Aaron"),
+            totp_item("5", &long, &long),
+        ],
+    );
+    let keys = FakeKeys::new(LockState::Unlocked);
+    let json = private_json(&codes_private(&vault, &keys, &private_req(Some("3"), false)).unwrap());
+    let ids: Vec<&str> = json.iter().map(|e| e["id"].as_str().unwrap()).collect();
+    assert_eq!(ids, ["4", "2", "3", "1", "5"]);
+    let last = &json[4];
+    assert_eq!(last["issuer"].as_str().unwrap().chars().count(), 256);
+    assert_eq!(last["account"].as_str().unwrap().chars().count(), 256);
 }

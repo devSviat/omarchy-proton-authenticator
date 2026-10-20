@@ -10,10 +10,10 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 
-use crate::app::{self, valid_item_id, CodesRequest};
+use crate::app::{self, valid_item_id, CodesRequest, PrivateRequest};
 use crate::clipboard::{Clipboard, WL_COPY};
 use crate::demo;
-use crate::domain::EntryView;
+use crate::domain::{EntryView, PrivateEntry};
 use crate::error::{ErrorCode, Result};
 use crate::keyring::{SecretToolKeys, SECRET_TOOL};
 use crate::output::{render, render_err, Rendered};
@@ -73,6 +73,9 @@ pub enum Command {
         only: Option<String>,
         allow_prompt: bool,
         demo: bool,
+        /// Labels only, except the `reveal` entry; excludes `only`.
+        private: bool,
+        reveal: Option<String>,
     },
     Copy {
         id: String,
@@ -96,9 +99,9 @@ struct CheckBody {
 }
 
 #[derive(Serialize)]
-struct CodesBody {
+struct CodesBody<E> {
     now: u64,
-    entries: Vec<EntryView>,
+    entries: Vec<E>,
 }
 
 #[derive(Serialize)]
@@ -130,19 +133,27 @@ fn clear_after(arg: Option<&str>) -> Result<Duration> {
 
 fn parse_codes(rest: &[&str]) -> Result<Command> {
     let (mut only, mut allow_prompt, mut demo) = (None, false, false);
+    let (mut private, mut reveal) = (false, None);
     let mut args = rest.iter().copied();
     while let Some(arg) = args.next() {
         match arg {
             "--only" if only.is_none() => only = Some(item_id(args.next())?),
             "--allow-prompt" => set_once(&mut allow_prompt)?,
             "--demo" => set_once(&mut demo)?,
+            "--private" => set_once(&mut private)?,
+            "--reveal" if reveal.is_none() => reveal = Some(item_id(args.next())?),
             _ => return Err(ErrorCode::InvalidArgument),
         }
+    }
+    if (reveal.is_some() && !private) || (private && only.is_some()) {
+        return Err(ErrorCode::InvalidArgument);
     }
     Ok(Command::Codes {
         only,
         allow_prompt,
         demo,
+        private,
+        reveal,
     })
 }
 
@@ -226,7 +237,7 @@ fn codes(
     allow_prompt: bool,
     demo: bool,
     timeouts: &Timeouts,
-) -> Result<CodesBody> {
+) -> Result<CodesBody<EntryView>> {
     let now = unix_now()?;
     let entries = if demo {
         let mut entries = demo::entries(now);
@@ -244,6 +255,26 @@ fn codes(
             unix: now,
         };
         app::codes(&real_vault()?, &timeouts.keys(allow_prompt), &req)?
+    };
+    Ok(CodesBody { now, entries })
+}
+
+fn codes_private(
+    reveal: Option<String>,
+    allow_prompt: bool,
+    demo: bool,
+    timeouts: &Timeouts,
+) -> Result<CodesBody<PrivateEntry>> {
+    let now = unix_now()?;
+    let entries = if demo {
+        demo::private_entries(now, reveal.as_deref())?
+    } else {
+        let req = PrivateRequest {
+            reveal,
+            allow_prompt,
+            unix: now,
+        };
+        app::codes_private(&real_vault()?, &timeouts.keys(allow_prompt), &req)?
     };
     Ok(CodesBody { now, entries })
 }
@@ -356,9 +387,17 @@ pub fn run(args: &[OsString], clipboard: &dyn Clipboard, timeouts: &Timeouts) ->
         })),
         Command::Check { demo } => render(check(demo)),
         Command::Codes {
+            private: true,
+            reveal,
+            allow_prompt,
+            demo,
+            ..
+        } => render(codes_private(reveal, allow_prompt, demo, timeouts)),
+        Command::Codes {
             only,
             allow_prompt,
             demo,
+            ..
         } => render(codes(only, allow_prompt, demo, timeouts)),
         Command::Copy {
             id,
@@ -393,6 +432,28 @@ mod tests {
                 only: Some("a:b".into()),
                 allow_prompt: true,
                 demo: true,
+                private: false,
+                reveal: None,
+            })
+        );
+        assert_eq!(
+            parse_strs(&["codes", "--private", "--allow-prompt", "--reveal", "a:b"]),
+            Ok(Command::Codes {
+                only: None,
+                allow_prompt: true,
+                demo: false,
+                private: true,
+                reveal: Some("a:b".into()),
+            })
+        );
+        assert_eq!(
+            parse_strs(&["codes", "--reveal", "a:b", "--private"]),
+            Ok(Command::Codes {
+                only: None,
+                allow_prompt: false,
+                demo: false,
+                private: true,
+                reveal: Some("a:b".into()),
             })
         );
         assert_eq!(
@@ -428,6 +489,15 @@ mod tests {
             timeouts.prompt
         );
         assert_eq!(budget(&["codes"]), timeouts.run);
+        assert_eq!(
+            budget(&["codes", "--private", "--reveal", "x", "--allow-prompt"]),
+            timeouts.prompt
+        );
+        assert_eq!(
+            budget(&["codes", "--private", "--reveal", "x"]),
+            timeouts.run
+        );
+        assert_eq!(budget(&["codes", "--private"]), timeouts.run);
         assert_eq!(budget(&["codes", "--allow-prompt", "--demo"]), timeouts.run);
         assert_eq!(budget(&["copy", "x"]), timeouts.run);
         assert_eq!(budget(&["check"]), timeouts.run);
@@ -454,6 +524,8 @@ mod tests {
             &["codes", "--only", "--demo"],
             &["codes", "--only", "--allow-prompt"],
             &["codes", "--only", "-"],
+            &["codes", "--private", "--reveal", "--demo"],
+            &["codes", "--private", "--reveal", "-"],
         ] {
             assert_eq!(
                 parse_strs(args),
@@ -468,6 +540,11 @@ mod tests {
         for args in [
             &["codes", "--only", "a", "--only", "b"][..],
             &["codes", "--allow-prompt", "--allow-prompt"],
+            &["codes", "--private", "--private"],
+            &["codes", "--private", "--reveal", "a", "--reveal", "b"],
+            &["codes", "--reveal", "a"],
+            &["codes", "--private", "--only", "a"],
+            &["codes", "--only", "a", "--private", "--reveal", "a"],
             &["copy", "x", "--clear-after", "5", "--clear-after", "6"],
             &["copy", "x", "--clear-after", "0005"],
             &["copy", "x", "--clear-after", "-5"],

@@ -3,8 +3,9 @@
 //! No two accounts share seed, algorithm and period, so no code is a suffix of
 //! another on screenshots.
 
-use crate::app::sort_entries;
-use crate::domain::{view, Entry, EntryView, OtpKind, Secret};
+use crate::app::{sort_entries, sort_private};
+use crate::domain::{view, Entry, EntryView, HiddenEntry, OtpKind, PrivateEntry, Secret};
+use crate::error::{ErrorCode, Result};
 use crate::otp::Algorithm;
 
 const SEED_SHA1: &[u8] = b"12345678901234567890";
@@ -76,21 +77,39 @@ const ACCOUNTS: [DemoAccount; 6] = [
     },
 ];
 
+fn account_view(a: &DemoAccount, unix: u64) -> EntryView {
+    let entry = Entry {
+        id: a.id.to_owned(),
+        issuer: a.issuer.to_owned(),
+        account: a.account.to_owned(),
+        kind: a.kind,
+        secret: Some(Secret::from(a.seed.to_vec())),
+    };
+    view(&entry, unix)
+}
+
 /// Views of the demo accounts at `unix`, sorted like real vault entries.
 pub fn entries(unix: u64) -> Vec<EntryView> {
-    let mut views: Vec<EntryView> = ACCOUNTS
-        .iter()
-        .map(|a| {
-            let entry = Entry {
-                id: a.id.to_owned(),
-                issuer: a.issuer.to_owned(),
-                account: a.account.to_owned(),
-                kind: a.kind,
-                secret: Some(Secret::from(a.seed.to_vec())),
-            };
-            view(&entry, unix)
-        })
-        .collect();
+    let mut views: Vec<EntryView> = ACCOUNTS.iter().map(|a| account_view(a, unix)).collect();
     sort_entries(&mut views);
     views
+}
+
+/// The demo counterpart of [`crate::app::codes_private`].
+pub fn private_entries(unix: u64, reveal: Option<&str>) -> Result<Vec<PrivateEntry>> {
+    if reveal.is_some_and(|id| ACCOUNTS.iter().all(|a| a.id != id)) {
+        return Err(ErrorCode::ItemNotFound);
+    }
+    let mut entries: Vec<PrivateEntry> = ACCOUNTS
+        .iter()
+        .map(|a| {
+            if reveal == Some(a.id) {
+                PrivateEntry::Revealed(account_view(a, unix))
+            } else {
+                PrivateEntry::Hidden(HiddenEntry::new(a.id.to_owned(), a.issuer, a.account))
+            }
+        })
+        .collect();
+    sort_private(&mut entries);
+    Ok(entries)
 }

@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use pa_helper::demo;
 use pa_helper::otp::{totp, Algorithm};
 use serde_json::{json, Value};
 use tempfile::TempDir;
@@ -322,6 +323,9 @@ fn flags_are_never_taken_for_ids() {
         &["copy", "--clear-after", "5"],
         &["codes", "--only", "--demo"],
         &["codes", "--only", "--allow-prompt"],
+        &["codes", "--private", "--reveal", "--demo"],
+        &["codes", "--private", "--reveal", "--allow-prompt"],
+        &["codes", "--private", "--reveal", "-x"],
     ];
     for args in cases {
         assert_eq!(error_of(&sandbox.run(args)), "INVALID_ARGUMENT", "{args:?}");
@@ -537,4 +541,148 @@ fn watchdog_times_out_stalled_run() {
         (Duration::from_secs(10)..Duration::from_secs(13)).contains(&elapsed),
         "{elapsed:?}"
     );
+}
+
+const ENTRY_FIELDS: [&str; 9] = [
+    "account",
+    "code",
+    "digits",
+    "id",
+    "issuer",
+    "kind",
+    "nextCode",
+    "period",
+    "remaining",
+];
+
+fn sorted_fields(entry: &Value) -> Vec<&str> {
+    let mut fields: Vec<&str> = entry
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    fields.sort_unstable();
+    fields
+}
+
+fn assert_hidden(entry: &Value) {
+    assert_eq!(sorted_fields(entry), ENTRY_FIELDS, "{entry}");
+    for field in ["kind", "code", "nextCode", "period", "digits", "remaining"] {
+        assert!(entry[field].is_null(), "{field} in {entry}");
+    }
+}
+
+/// Every demo code and next code at `at`, except those of `revealed`.
+fn hidden_demo_codes(at: u64, revealed: Option<&str>) -> Vec<String> {
+    demo::entries(at)
+        .into_iter()
+        .filter(|e| Some(e.id.as_str()) != revealed)
+        .flat_map(|e| [e.code.clone(), e.next_code.clone()])
+        .flatten()
+        .collect()
+}
+
+fn assert_no_code_leaks(text: &str, at: u64, revealed: Option<&str>) {
+    for code in hidden_demo_codes(at, revealed) {
+        assert!(!text.contains(&format!("\"{code}\"")), "{code} in {text}");
+    }
+}
+
+#[test]
+fn private_demo_hides_every_code() {
+    if !memlock_fits() {
+        return;
+    }
+    let out = Sandbox::new().run(&["codes", "--private", "--demo"]);
+    let text = line(&out);
+    let value = reply(&out);
+    assert_eq!(value["ok"], true);
+    let mut keys: Vec<&String> = value.as_object().unwrap().keys().collect();
+    keys.sort();
+    assert_eq!(keys, ["entries", "now", "ok", "protocol"]);
+    let at = value["now"].as_u64().unwrap();
+    let entries = value["entries"].as_array().unwrap();
+    let ids: Vec<&str> = entries.iter().map(|e| e["id"].as_str().unwrap()).collect();
+    assert_eq!(
+        ids,
+        [
+            "demo-aws",
+            "demo-discord",
+            "demo-github",
+            "demo-google",
+            "demo-proton",
+            "demo-tailscale"
+        ]
+    );
+    assert_eq!(entries[2]["issuer"], "GitHub");
+    assert_eq!(entries[2]["account"], "octocat@example.com");
+    entries.iter().for_each(assert_hidden);
+    assert_no_code_leaks(&text, at, None);
+}
+
+#[test]
+fn private_demo_reveals_one_code() {
+    if !memlock_fits() {
+        return;
+    }
+    let out = Sandbox::new().run(&["codes", "--private", "--reveal", "demo-github", "--demo"]);
+    let text = line(&out);
+    let value = reply(&out);
+    let at = value["now"].as_u64().unwrap();
+    let entries = value["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 6);
+    for entry in entries {
+        if entry["id"] == "demo-github" {
+            assert_eq!(sorted_fields(entry), ENTRY_FIELDS);
+            assert_eq!(entry["kind"], "totp");
+            assert_eq!(
+                entry["code"],
+                totp(RFC6238_SHA1_SEED, at, 30, Algorithm::Sha1, 6)
+            );
+            assert_eq!(
+                entry["nextCode"],
+                totp(RFC6238_SHA1_SEED, at + 30, 30, Algorithm::Sha1, 6)
+            );
+            assert_eq!(entry["period"], 30);
+            assert_eq!(entry["digits"], 6);
+            assert_eq!(entry["remaining"], 30 - at % 30);
+        } else {
+            assert_hidden(entry);
+        }
+    }
+    assert_no_code_leaks(&text, at, Some("demo-github"));
+}
+
+#[test]
+fn private_argument_rules() {
+    if !memlock_fits() {
+        return;
+    }
+    let sandbox = Sandbox::new();
+    let cases: &[&[&str]] = &[
+        &["codes", "--reveal", "demo-github", "--demo"],
+        &["codes", "--reveal", "demo-github"],
+        &["codes", "--private", "--only", "demo-github", "--demo"],
+        &["codes", "--only", "demo-github", "--private", "--demo"],
+        &["codes", "--private", "--private", "--demo"],
+        &[
+            "codes",
+            "--private",
+            "--reveal",
+            "a",
+            "--reveal",
+            "b",
+            "--demo",
+        ],
+        &["codes", "--private", "--reveal"],
+        &["codes", "--private", "--reveal", "a/b", "--demo"],
+    ];
+    for args in cases {
+        assert_eq!(error_of(&sandbox.run(args)), "INVALID_ARGUMENT", "{args:?}");
+    }
+    let out = sandbox.run(&["codes", "--private", "--reveal", "demo-nope", "--demo"]);
+    assert_eq!(error_of(&out), "ITEM_NOT_FOUND");
+    let out = sandbox.run(&["codes", "--private"]);
+    assert_eq!(error_of(&out), "VAULT_NOT_FOUND");
 }
