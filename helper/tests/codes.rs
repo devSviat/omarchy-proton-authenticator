@@ -277,7 +277,11 @@ fn key_id_charset_and_length_accepted() {
     let max = format!("_{}", "a".repeat(127));
     for id in ["_x", "A.b:c-d_e", "0", max.as_str()] {
         let tmp = TempDir::new().unwrap();
-        let vault = vault_with(tmp.path(), &key_ref(Some(id), &SALT, 0), &[]);
+        let vault = vault_with(
+            tmp.path(),
+            &key_ref(Some(id), &SALT, 0),
+            &[totp_item("t1", "GitHub", "me")],
+        );
         let keys = FakeKeys::new(LockState::Unlocked);
         codes(&vault, &keys, &req(None, true)).unwrap();
         assert_eq!(*keys.last_key_id.borrow(), id);
@@ -404,4 +408,44 @@ fn sorted_by_issuer_then_account_case_insensitive() {
         .map(|v| v.id)
         .collect();
     assert_eq!(ids, ["4", "2", "3", "1"]);
+}
+
+#[test]
+fn empty_vault_returns_nothing_without_touching_keys() {
+    let tmp = TempDir::new().unwrap();
+    let vault = vault_with(tmp.path(), &key_ref(Some("a"), &SALT, 0), &[]);
+    let keys = FakeKeys::new(LockState::Locked);
+    assert!(codes(&vault, &keys, &req(None, false)).unwrap().is_empty());
+    assert!(codes(&vault, &keys, &req(None, true)).unwrap().is_empty());
+    assert_eq!(keys.root_calls.get(), 0);
+}
+
+#[test]
+fn invalid_item_id_is_format_changed() {
+    let long = "a".repeat(129);
+    for id in ["", "has space", "a/b", "semi;colon", "ü", long.as_str()] {
+        let tmp = TempDir::new().unwrap();
+        let vault = vault_with(
+            tmp.path(),
+            &key_ref(Some("a"), &SALT, 0),
+            &[totp_item("ok", "GitHub", "me"), totp_item(id, "X", "y")],
+        );
+        let keys = FakeKeys::new(LockState::Unlocked);
+        let err = codes(&vault, &keys, &req(None, true)).unwrap_err();
+        assert_eq!(err, ErrorCode::VaultFormatChanged, "id {id:?}");
+        assert_eq!(keys.root_calls.get(), 0);
+    }
+}
+
+#[test]
+fn item_id_charset_and_length_accepted() {
+    let max = "a".repeat(128);
+    let tmp = TempDir::new().unwrap();
+    let vault = vault_with(
+        tmp.path(),
+        &key_ref(Some("a"), &SALT, 0),
+        &[totp_item("-A.b:c_d", "A", "x"), totp_item(&max, "B", "x")],
+    );
+    let keys = FakeKeys::new(LockState::Unlocked);
+    assert_eq!(codes(&vault, &keys, &req(None, false)).unwrap().len(), 2);
 }
