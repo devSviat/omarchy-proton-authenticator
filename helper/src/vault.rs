@@ -1,32 +1,34 @@
 use std::cmp::Ordering;
 use std::ffi::OsString;
 use std::fmt;
-use std::fs;
-use std::os::unix::ffi::OsStrExt;
+use std::fs::{self, File, OpenOptions};
+use std::io::{Cursor, Read};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use rusqlite::backup::{Backup, StepResult};
 use rusqlite::config::DbConfig;
 use rusqlite::limits::Limit;
-use rusqlite::{Connection, OpenFlags, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension};
 use zeroize::Zeroizing;
 
 use crate::error::{ErrorCode, Result};
 use crate::ssv::{self, Value};
+use crate::wal;
 
 const DB_FILE_NAME: &str = "IndexedDB.sqlite3";
 const MAX_WALK_DEPTH: usize = 6;
 const MAX_CANDIDATES: usize = 32;
 const MAX_DIR_ENTRIES: usize = 10_000;
 const MAX_ITEMS: usize = 1000;
-const MAX_DB_BYTES: u64 = 16 * 1024 * 1024;
-const SOURCE_CACHE_KIB: i64 = 256;
+const MAX_MAIN_BYTES: u64 = 4 * 1024 * 1024;
+const MAX_WAL_BYTES: u64 = 4 * 1024 * 1024;
+const MAX_IMAGE_BYTES: usize = 8 * 1024 * 1024;
 const LIMIT_LENGTH_BYTES: i32 = 1024 * 1024;
 const LIMIT_SQL_LENGTH_BYTES: i32 = 4096;
-const BUSY_RETRIES: usize = 3;
-const BUSY_PAUSE: Duration = Duration::from_millis(100);
+const STABLE_RETRIES: usize = 3;
+const STABLE_PAUSE: Duration = Duration::from_millis(50);
 
 pub struct StorageKeyRef {
     pub id: String,
@@ -77,7 +79,13 @@ struct Candidate {
 
 enum Probe {
     NoMatch,
-    Match(Option<Connection>),
+    Match(Connection),
+}
+
+/// Raw bytes of the database file and its `-wal`, read as one consistent view.
+pub struct RawFiles {
+    pub main: Zeroizing<Vec<u8>>,
+    pub wal: Option<Zeroizing<Vec<u8>>>,
 }
 
 impl ProtonIdbVault {
@@ -93,7 +101,7 @@ impl ProtonIdbVault {
         Ok(home.join(".local/share/me.proton.authenticator/databases/indexeddb"))
     }
 
-    fn select(&self, want_snapshot: bool) -> Result<(Candidate, Option<Connection>)> {
+    fn select(&self) -> Result<(Candidate, Connection)> {
         let mut candidates: Vec<Candidate> = find_candidates(&self.root)
             .into_iter()
             .filter_map(|path| {
@@ -103,9 +111,9 @@ impl ProtonIdbVault {
             .collect();
         candidates.sort_by_key(|c| std::cmp::Reverse(c.mtime));
         for candidate in candidates {
-            match probe_with_retry(&candidate.path, want_snapshot)? {
+            match probe(&candidate.path)? {
                 Probe::NoMatch => continue,
-                Probe::Match(snapshot) => return Ok((candidate, snapshot)),
+                Probe::Match(conn) => return Ok((candidate, conn)),
             }
         }
         Err(ErrorCode::VaultNotFound)
@@ -114,7 +122,7 @@ impl ProtonIdbVault {
 
 impl VaultSource for ProtonIdbVault {
     fn modified(&self) -> Result<u64> {
-        let (candidate, _) = self.select(false)?;
+        let (candidate, _) = self.select()?;
         Ok(candidate
             .mtime
             .duration_since(UNIX_EPOCH)
@@ -122,8 +130,7 @@ impl VaultSource for ProtonIdbVault {
     }
 
     fn load(&self) -> Result<(StorageKeyRef, Vec<EncryptedItem>)> {
-        let (_, snapshot) = self.select(true)?;
-        let conn = snapshot.ok_or(ErrorCode::Internal)?;
+        let (_, conn) = self.select()?;
         let key_ref = read_key_ref(&conn)?;
         let items = read_items(&conn)?;
         Ok((key_ref, items))
@@ -178,53 +185,16 @@ fn effective_mtime(db: &Path) -> Option<SystemTime> {
     Some(wal.map_or(main, |w| main.max(w)))
 }
 
-fn is_busy(err: &rusqlite::Error) -> bool {
-    matches!(
-        err,
-        rusqlite::Error::SqliteFailure(e, _)
-            if matches!(
-                e.code,
-                rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
-            )
-    )
-}
-
-fn is_corrupt(err: &rusqlite::Error) -> bool {
-    matches!(
-        err,
-        rusqlite::Error::SqliteFailure(e, _) if e.code == rusqlite::ErrorCode::DatabaseCorrupt
-    )
-}
-
-fn is_cant_open(err: &rusqlite::Error) -> bool {
-    matches!(
-        err,
-        rusqlite::Error::SqliteFailure(e, _) if e.code == rusqlite::ErrorCode::CannotOpen
-    )
-}
-
-fn register_collation(conn: &Connection) -> rusqlite::Result<()> {
-    conn.create_collation("IDBKEY", |a, b| -> Ordering {
-        a.as_bytes().cmp(b.as_bytes())
-    })
-}
-
 fn wal_path(db: &Path) -> PathBuf {
     let mut name = OsString::from(db.as_os_str());
     name.push("-wal");
     PathBuf::from(name)
 }
 
-fn percent_encode_path(path: &Path) -> String {
-    let mut out = String::new();
-    for &b in path.as_os_str().as_bytes() {
-        if b.is_ascii_alphanumeric() || matches!(b, b'/' | b'-' | b'.' | b'_' | b'~') {
-            out.push(b as char);
-        } else {
-            out.push_str(&format!("%{b:02X}"));
-        }
-    }
-    out
+fn register_collation(conn: &Connection) -> rusqlite::Result<()> {
+    conn.create_collation("IDBKEY", |a, b| -> Ordering {
+        a.as_bytes().cmp(b.as_bytes())
+    })
 }
 
 /// Applies SQLite's guidance for untrusted database files before any query.
@@ -241,27 +211,6 @@ pub fn harden(conn: &Connection) -> rusqlite::Result<()> {
     register_collation(conn)
 }
 
-// readonly_shm keeps SQLite from creating or writing the -shm file of a WAL
-// database; without a live -shm the open fails instead of touching the dir.
-pub fn open_source(path: &Path) -> rusqlite::Result<Connection> {
-    let absolute =
-        std::path::absolute(path).map_err(|_| rusqlite::Error::InvalidPath(path.into()))?;
-    let uri = format!(
-        "file:{}?mode=ro&readonly_shm=1",
-        percent_encode_path(&absolute)
-    );
-    let conn = Connection::open_with_flags(
-        uri,
-        OpenFlags::SQLITE_OPEN_READ_ONLY
-            | OpenFlags::SQLITE_OPEN_URI
-            | OpenFlags::SQLITE_OPEN_NOFOLLOW,
-    )?;
-    conn.busy_timeout(Duration::ZERO)?;
-    harden(&conn)?;
-    conn.pragma_update(None, "cache_size", -SOURCE_CACHE_KIB)?;
-    Ok(conn)
-}
-
 pub fn open_memory() -> rusqlite::Result<Connection> {
     let conn = Connection::open_in_memory()?;
     harden(&conn)?;
@@ -269,70 +218,161 @@ pub fn open_memory() -> rusqlite::Result<Connection> {
     Ok(conn)
 }
 
-fn probe_once(path: &Path, want_snapshot: bool) -> Result<Option<Probe>> {
-    let source = match open_source(path) {
-        Ok(conn) => conn,
-        Err(e) if is_busy(&e) => return Ok(None),
-        Err(e) if is_cant_open(&e) && wal_path(path).exists() => return Err(ErrorCode::VaultBusy),
-        Err(_) => return Ok(Some(Probe::NoMatch)),
+#[derive(PartialEq, Clone, Copy)]
+struct Signature {
+    dev: u64,
+    ino: u64,
+    len: u64,
+    mtime_sec: i64,
+    mtime_nsec: i64,
+}
+
+impl Signature {
+    fn of(meta: &fs::Metadata) -> Self {
+        Self {
+            dev: meta.dev(),
+            ino: meta.ino(),
+            len: meta.len(),
+            mtime_sec: meta.mtime(),
+            mtime_nsec: meta.mtime_nsec(),
+        }
+    }
+}
+
+enum Attempt {
+    Unstable,
+    Skip,
+    Done(RawFiles),
+}
+
+fn open_nofollow(path: &Path) -> std::io::Result<File> {
+    OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+}
+
+fn signature_of_path(path: &Path) -> std::io::Result<Option<Signature>> {
+    match fs::symlink_metadata(path) {
+        Ok(meta) if meta.is_file() => Ok(Some(Signature::of(&meta))),
+        Ok(_) => Err(std::io::Error::from(std::io::ErrorKind::InvalidInput)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+fn read_exact_file(file: &File, expected: Signature) -> Result<Option<Zeroizing<Vec<u8>>>> {
+    let meta = file.metadata().map_err(|_| ErrorCode::Internal)?;
+    if !meta.is_file() || Signature::of(&meta) != expected {
+        return Ok(None);
+    }
+    let len = usize::try_from(expected.len).map_err(|_| ErrorCode::VaultFormatChanged)?;
+    let mut buf = Zeroizing::new(Vec::with_capacity(len));
+    file.take(expected.len + 1)
+        .read_to_end(&mut buf)
+        .map_err(|_| ErrorCode::Internal)?;
+    Ok((buf.len() == len).then_some(buf))
+}
+
+fn read_attempt(path: &Path, wal: &Path, hook: &mut dyn FnMut()) -> Result<Attempt> {
+    let Ok(Some(main_before)) = signature_of_path(path) else {
+        return Ok(Attempt::Skip);
     };
-    match has_required_stores(&source) {
-        Ok(true) => {}
-        Ok(false) => return Ok(Some(Probe::NoMatch)),
-        Err(e) if is_corrupt(&e) => return Err(ErrorCode::VaultFormatChanged),
-        Err(e) if is_busy(&e) => return Ok(None),
-        Err(e) if is_cant_open(&e) && wal_path(path).exists() => return Err(ErrorCode::VaultBusy),
-        Err(_) => return Ok(Some(Probe::NoMatch)),
-    }
-    match is_table(&source, "Records") {
-        Ok(true) => {}
-        Ok(false) => return Err(ErrorCode::VaultFormatChanged),
-        Err(e) if is_busy(&e) => return Ok(None),
-        Err(_) => return Err(ErrorCode::VaultFormatChanged),
-    }
-    let size = fs::symlink_metadata(path)
-        .map_err(|_| ErrorCode::VaultNotFound)?
-        .len();
-    if size > MAX_DB_BYTES {
+    let wal_before = signature_of_path(wal).map_err(|_| ErrorCode::VaultFormatChanged)?;
+    if main_before.len > MAX_MAIN_BYTES || wal_before.is_some_and(|s| s.len > MAX_WAL_BYTES) {
         return Err(ErrorCode::VaultFormatChanged);
     }
-    if !want_snapshot {
-        return Ok(Some(Probe::Match(None)));
+
+    let Ok(main_file) = open_nofollow(path) else {
+        return Ok(Attempt::Unstable);
+    };
+    let Some(main) = read_exact_file(&main_file, main_before)? else {
+        return Ok(Attempt::Unstable);
+    };
+    let mut wal_file = None;
+    let mut wal_bytes = None;
+    if let Some(sig) = wal_before {
+        let Ok(file) = open_nofollow(wal) else {
+            return Ok(Attempt::Unstable);
+        };
+        let Some(bytes) = read_exact_file(&file, sig)? else {
+            return Ok(Attempt::Unstable);
+        };
+        wal_file = Some(file);
+        wal_bytes = Some(bytes);
     }
-    match snapshot(&source) {
-        Ok(Some(memory)) => Ok(Some(Probe::Match(Some(memory)))),
-        Ok(None) => Ok(None),
-        Err(e) if is_busy(&e) => Ok(None),
-        Err(e) if is_cant_open(&e) && wal_path(path).exists() => Err(ErrorCode::VaultBusy),
-        Err(_) => Err(ErrorCode::VaultFormatChanged),
+
+    hook();
+
+    let main_stable = signature_of_path(path).ok().flatten() == Some(main_before)
+        && main_file
+            .metadata()
+            .is_ok_and(|m| Signature::of(&m) == main_before);
+    let wal_stable = signature_of_path(wal).ok() == Some(wal_before)
+        && match (&wal_file, wal_before) {
+            (Some(file), Some(sig)) => file.metadata().is_ok_and(|m| Signature::of(&m) == sig),
+            _ => true,
+        };
+    if !(main_stable && wal_stable) {
+        return Ok(Attempt::Unstable);
     }
+    Ok(Attempt::Done(RawFiles {
+        main,
+        wal: wal_bytes,
+    }))
 }
 
-fn snapshot(source: &Connection) -> rusqlite::Result<Option<Connection>> {
-    let mut memory = open_memory()?;
-    let backup = Backup::new(source, &mut memory)?;
-    match backup.step(-1)? {
-        StepResult::Done => {}
-        StepResult::Busy | StepResult::Locked => return Ok(None),
-        _ => return Err(rusqlite::Error::InvalidQuery),
-    }
-    drop(backup);
-    if !quick_check_ok(&memory)? {
-        return Err(rusqlite::Error::InvalidQuery);
-    }
-    Ok(Some(memory))
-}
-
-fn probe_with_retry(path: &Path, want_snapshot: bool) -> Result<Probe> {
-    for attempt in 0..=BUSY_RETRIES {
+/// Reads the database and its `-wal` without SQLite touching either, retrying
+/// when either file changes during the read. `Ok(None)` means the path is not
+/// a readable regular file. `hook` runs after the reads, before the final stat.
+pub fn read_stable(path: &Path, hook: &mut dyn FnMut()) -> Result<Option<RawFiles>> {
+    let wal = wal_path(path);
+    for attempt in 0..=STABLE_RETRIES {
         if attempt > 0 {
-            thread::sleep(BUSY_PAUSE);
+            thread::sleep(STABLE_PAUSE);
         }
-        if let Some(probe) = probe_once(path, want_snapshot)? {
-            return Ok(probe);
+        match read_attempt(path, &wal, hook)? {
+            Attempt::Done(files) => return Ok(Some(files)),
+            Attempt::Skip => return Ok(None),
+            Attempt::Unstable => {}
         }
     }
     Err(ErrorCode::VaultBusy)
+}
+
+fn probe(path: &Path) -> Result<Probe> {
+    let Some(files) = read_stable(path, &mut || {})? else {
+        return Ok(Probe::NoMatch);
+    };
+    if !wal::has_sqlite_header(&files.main) {
+        return Ok(Probe::NoMatch);
+    }
+    let image = wal::build_image(
+        &files.main,
+        files.wal.as_ref().map(|w| w.as_slice()),
+        MAX_IMAGE_BYTES,
+    )?;
+    drop(files);
+
+    let mut conn = open_memory().map_err(|_| ErrorCode::Internal)?;
+    conn.deserialize_read_exact("main", Cursor::new(&image[..]), image.len(), true)
+        .map_err(|_| ErrorCode::VaultFormatChanged)?;
+    drop(image);
+
+    let changed = |_| ErrorCode::VaultFormatChanged;
+    if !is_table(&conn, "ObjectStoreInfo").map_err(changed)? {
+        return Ok(Probe::NoMatch);
+    }
+    if !has_required_stores(&conn).map_err(changed)? {
+        return Ok(Probe::NoMatch);
+    }
+    if !is_table(&conn, "Records").map_err(changed)? {
+        return Err(ErrorCode::VaultFormatChanged);
+    }
+    if !quick_check_ok(&conn).map_err(changed)? {
+        return Err(ErrorCode::VaultFormatChanged);
+    }
+    Ok(Probe::Match(conn))
 }
 
 fn quick_check_ok(conn: &Connection) -> rusqlite::Result<bool> {
@@ -344,14 +384,14 @@ fn quick_check_ok(conn: &Connection) -> rusqlite::Result<bool> {
 }
 
 fn is_table(conn: &Connection, name: &str) -> rusqlite::Result<bool> {
-    let kind: Option<String> = conn
+    let found: Option<i64> = conn
         .query_row(
-            "SELECT type FROM sqlite_schema WHERE name = ?1",
+            "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = ?1",
             [name],
             |row| row.get(0),
         )
         .optional()?;
-    Ok(kind.as_deref() == Some("table"))
+    Ok(found.is_some())
 }
 
 fn store_id(conn: &Connection, name: &str) -> rusqlite::Result<Option<i64>> {
@@ -364,9 +404,6 @@ fn store_id(conn: &Connection, name: &str) -> rusqlite::Result<Option<i64>> {
 }
 
 fn has_required_stores(conn: &Connection) -> rusqlite::Result<bool> {
-    if !is_table(conn, "ObjectStoreInfo")? {
-        return Ok(false);
-    }
     Ok(store_id(conn, "items")?.is_some() && store_id(conn, "storageKey")?.is_some())
 }
 

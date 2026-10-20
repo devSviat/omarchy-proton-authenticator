@@ -99,3 +99,57 @@ pub fn write_vault_records_as_view(dir: &Path, key_ref: &Value, items: &[Value])
     )
     .unwrap();
 }
+
+pub fn wal_path(dir: &Path) -> PathBuf {
+    dir.join(format!("{DB_NAME}-wal"))
+}
+
+pub fn shm_path(dir: &Path) -> PathBuf {
+    dir.join(format!("{DB_NAME}-shm"))
+}
+
+/// Cleanly closed WAL database: the last connection checkpoints and removes the sidecars.
+pub fn write_vault_wal_clean(dir: &Path, key_ref: &Value, items: &[Value]) {
+    std::fs::create_dir_all(dir).unwrap();
+    let conn = open(&db_path(dir));
+    conn.pragma_update(None, "journal_mode", "wal").unwrap();
+    populate(&conn, key_ref, items);
+}
+
+/// Many transactions, a full checkpoint, then a few more: the WAL restarts
+/// with new salts and keeps stale frames from the first round behind the new ones.
+pub fn write_vault_wal_restarted(dir: &Path, key_ref: &Value, first: &[Value], second: &[Value]) {
+    use rusqlite::config::DbConfig;
+    std::fs::create_dir_all(dir).unwrap();
+    let conn = open(&db_path(dir));
+    conn.set_db_config(DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, true)
+        .unwrap();
+    conn.pragma_update(None, "journal_mode", "wal").unwrap();
+    conn.pragma_update(None, "wal_autocheckpoint", 0).unwrap();
+    populate(&conn, key_ref, first);
+    conn.query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |_| Ok(()))
+        .unwrap();
+    for (i, item) in second.iter().enumerate() {
+        insert_record(&conn, "items", format!("later-{i}").as_bytes(), item);
+    }
+}
+
+pub fn copy_db_files(from: &Path, to: &Path) {
+    std::fs::create_dir_all(to).unwrap();
+    std::fs::copy(db_path(from), db_path(to)).unwrap();
+    if wal_path(from).exists() {
+        std::fs::copy(wal_path(from), wal_path(to)).unwrap();
+    }
+}
+
+/// What SQLite itself reads from a copy of the main file and `-wal`.
+pub fn sqlite_records(dir: &Path) -> Vec<(i64, Vec<u8>)> {
+    let conn = open(&db_path(dir));
+    let mut stmt = conn
+        .prepare("SELECT objectStoreID, value FROM Records ORDER BY recordID")
+        .unwrap();
+    stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .map(|r| r.unwrap())
+        .collect()
+}

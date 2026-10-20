@@ -8,3 +8,4 @@ pub mod output;
 pub mod ssv;
 pub mod uri;
 pub mod vault;
+pub mod wal;
