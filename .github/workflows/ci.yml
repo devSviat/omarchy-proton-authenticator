@@ -1,0 +1,29 @@
+name: CI
+
+on:
+  push:
+    branches: [dev, main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  helper:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: helper
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets --locked -- -D warnings
+      - run: cargo test --locked
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+          manifest-path: helper/Cargo.toml
+          arguments: --locked
