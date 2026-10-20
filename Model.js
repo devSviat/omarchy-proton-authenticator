@@ -140,13 +140,17 @@ var STATUS_TEXT = {
 }
 
 function statusText(status) {
-  return STATUS_TEXT[status] || "Proton Authenticator error: " + String(status)
+  return Object.prototype.hasOwnProperty.call(STATUS_TEXT, status)
+    ? STATUS_TEXT[status]
+    : "Proton Authenticator error: " + String(status)
 }
 
 function lower(value) {
   return value === null || value === undefined ? "" : String(value).toLocaleLowerCase()
 }
 
+// Caseless scripts (CJK, Arabic) have no letter case, so every character
+// there counts as a word start and substring matches score 2.
 function isWordChar(c) {
   return c.toLowerCase() !== c.toUpperCase() || (c >= "0" && c <= "9")
 }
@@ -211,9 +215,10 @@ function compareEntries(a, b) {
 
 function defaultOrder(entries, prefs) {
   var p = normalizePrefs(prefs)
-  var byId = {}
+  entries = entries.filter(function(e) { return e !== null && e !== undefined })
+  var byId = Object.create(null)
   entries.forEach(function(e) { byId[e.id] = e })
-  var placed = {}
+  var placed = Object.create(null)
   var out = []
   p.pinned.concat(p.recent).forEach(function(id) {
     if (byId[id] && !placed[id]) {

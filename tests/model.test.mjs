@@ -177,3 +177,33 @@ test("isStale compares age to the threshold in hours", () => {
   assert.equal(M.isStale(now, now - 24 * 3600, 24), true)
   assert.equal(M.isStale(now, now, 24), false)
 })
+
+test("ids named like Object.prototype keys survive ordering", () => {
+  const list = [entry("constructor", "C"), entry("toString", "T"), entry("__proto__", "P"), entry("ok", "O")]
+  assert.deepEqual(ids(M.filterAndOrder(list, "", M.emptyPrefs())), ["constructor", "ok", "__proto__", "toString"])
+  const prefs = { pinned: ["__proto__", "toString"], recent: ["constructor", "__proto__"], privacy: false }
+  assert.deepEqual(ids(M.filterAndOrder(list, "", prefs)), ["__proto__", "toString", "constructor", "ok"])
+})
+
+test("statusText ignores inherited keys", () => {
+  assert.match(M.statusText("constructor"), /^Proton Authenticator error: constructor$/)
+})
+
+test("null entries are skipped", () => {
+  const list = [null, entry("a", "Acme"), undefined]
+  assert.deepEqual(ids(M.filterAndOrder(list, "", M.emptyPrefs())), ["a"])
+  assert.deepEqual(ids(M.filterAndOrder(list, "ac", M.emptyPrefs())), ["a"])
+})
+
+test("an account prefix scores 2, below an issuer prefix", () => {
+  const list = [entry("acc", "Zed", "alice"), entry("iss", "Alice", "x")]
+  assert.deepEqual(ids(M.filterAndOrder(list, "ali", M.emptyPrefs())), ["iss", "acc"])
+})
+
+test("camel humps and digits", () => {
+  assert.equal(M.fuzzyScore("GitHUB", "gh"), 2)
+  assert.equal(M.fuzzyScore("GitHUB", "hub"), 2)
+  assert.equal(M.fuzzyScore("GitHUB", "ub"), 1)
+  assert.equal(M.fuzzyScore("Web3Auth", "auth"), 1)
+  assert.equal(M.fuzzyScore("Web3 Auth", "auth"), 2)
+})
