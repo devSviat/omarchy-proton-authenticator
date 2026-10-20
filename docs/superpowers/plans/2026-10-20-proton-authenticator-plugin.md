@@ -1,5 +1,12 @@
 # Proton Authenticator Omarchy Plugin Implementation Plan
 
+> **Historical document.** This is the implementation plan as written before the work
+> started. It is kept unchanged as a record and is superseded by
+> [the spec](../specs/2026-10-20-proton-authenticator-plugin-design.md) wherever they differ:
+> most notably, the shipped helper uses no SQLite at runtime (its own WAL applier and B-tree
+> reader; `rusqlite` is a test-only reference), there is no `indicators/` widget, and the
+> Rust edition, MSRV and clipboard holder differ. Do not implement from this plan.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** An Omarchy bar plugin (`sviat.proton-authenticator`) that shows the official Proton Authenticator's TOTP codes in a fast keyboard-driven panel. A small Rust helper reads the official vault read-only and is the only place secrets ever exist.

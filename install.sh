@@ -65,7 +65,6 @@ if [[ -x /usr/bin/wl-copy ]] && /usr/bin/wl-copy --help 2>&1 | grep -q -- '--sen
 else
   need no "/usr/bin/wl-copy with --sensitive" "pacman: wl-clipboard (2.3 or newer)"
 fi
-need "$([[ -e /usr/lib/libsqlite3.so ]] && echo yes || echo no)" "/usr/lib/libsqlite3.so" "pacman: sqlite"
 need "$(present /usr/bin/proton-authenticator)" "/usr/bin/proton-authenticator" "AUR: proton-authenticator-bin"
 
 if (( missing )); then

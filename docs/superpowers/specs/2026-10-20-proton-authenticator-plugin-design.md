@@ -48,8 +48,8 @@ The Omarchy plugin catalog already lists several community plugins for Proton Au
   - the manifest cannot register hotkeys.
 - **Code-structure reference:** the author's `sviat.nightlight` plugin (github.com/devSviat/omarchy-nightlight):
   - `Service.qml` is a singleton that owns state and processes;
-  - `Panel.qml` gets it via `bar?.shell?.serviceFor("<id>")` and uses `manageIpc: false`;
-  - `indicators/*.qml` are visual only.
+  - `Panel.qml` gets it via `bar?.shell?.serviceFor("<id>")` and uses `manageIpc: false`.
+  - Nightlight also ships `indicators/*.qml`; this plugin has none, because its bar icon is the panel's own button.
 - **Proton Authenticator vault:** `~/.local/share/me.proton.authenticator/databases/indexeddb/v1/tauri_localhost_0/<hash>/IndexedDB.sqlite3`. It is a WebKit IndexedDB stored in SQLite (WAL mode) with the object stores `items` and `storageKey`.
   - The 32-byte root key lives in the Secret Service: service `com.proton.authenticator`, username = the record's `adapterKeyId` (or `id` for pre-1.1.4 layouts).
   - Storage key = HKDF-SHA256(root key, salt from `storageKey`, info `authenticator;storage-key`).
@@ -66,21 +66,20 @@ The plugin has two parts:
 
 1. **QML plugin (`sviat.proton-authenticator`)**, kinds `service` + `bar-widget`:
    - `Service.qml` owns state, runs the helper and polls vault status;
-   - `Panel.qml` is the panel that drops from the bar;
-   - `indicators/` is the bar icon.
+   - `Panel.qml` is both the bar icon (its own `BarIconButton`) and the panel that drops from it.
 2. **Helper (`pa-helper`, Rust)**, a short-lived process. It reads and decrypts the vault, computes codes and puts a code on the clipboard. It is built from source into the plugin directory, and QML calls it **by absolute path inside the plugin directory**, never through `PATH`.
 
-Trust boundary: **TOTP seeds and keys exist only inside the helper**, and only for one invocation. QML only ever receives ids, labels (issuer/account) and current codes.
+Trust boundary: **TOTP seeds, the derived storage key and decrypted items exist only inside the helper**, and only for one invocation. The vault's root key also passes through the Secret Service, the D-Bus session bus and `/usr/bin/secret-tool` (and its output pipe) on its way in; that is the keyring's own path, not one this plugin adds. QML only ever receives ids, labels (issuer/account) and current codes.
 
 ### Helper protocol
 
 Each command prints exactly one JSON line, bounded in size, in an envelope `{"ok":…,"protocol":1,…}`. Errors carry only a machine-readable code, never data.
 
-- `version` → helper version and protocol number.
+- `version` → helper version and protocol number. The service compares the version with `manifest.version` and treats any difference as `HELPER_OUTDATED`.
 - `check [--demo]` → `status` (`READY` or an error code) and `vaultMtime`, without decrypting anything and without ever opening a keyring prompt. It also verifies that `wl-copy` and `secret-tool` are available.
 - `codes [--only <id>] [--allow-prompt] [--demo]` → `now` and `entries` (`id`, `issuer`, `account`, `kind`, `code`, `nextCode`, `period`, `digits`, `remaining`). The output type has no field that could hold a secret.
-- `codes --private [--reveal <id>] [--allow-prompt] [--demo]` → the same reply shape, but every entry has only `id`, `issuer` and `account` set; the other fields are present and `null`. The `--reveal` entry, if given, is computed in full. Without `--reveal` the keyring is not touched and nothing is decrypted (labels are cleartext in the vault); with it, only that item is decrypted, under the same lock rules as `codes`. `--reveal` requires `--private`, `--private` excludes `--only`, and an unknown reveal id is `ITEM_NOT_FOUND`.
-- `copy <id> [--clear-after <5..120>] [--demo]` → the helper computes the code itself (the next one if fewer than 5 s remain) and passes it via stdin to a detached holder: a fresh exec of its own binary (`/proc/self/exe`) that leads a new session and process group, with the scrubbed environment. The holder hands the code to `wl-copy --foreground --sensitive --type text/plain` via stdin and confirms with one status byte; only then does `copy` reply and exit, so killing the caller (shell restart, plugin reload) cannot strand the code. The holder keeps `wl-copy` alive until the deadline. If `wl-copy` is still the clipboard owner at the deadline, the holder kills it and runs `wl-copy --clear`. If the user copied something else in the meantime, `wl-copy` has already exited and nothing is cleared. `wl-copy` gets SIGTERM if its holder dies. No copy or hash of the code is kept.
+- `codes --private [--reveal <id>] [--allow-prompt] [--demo]` → the same reply shape, but every entry has only `id`, `issuer` and `account` set; the other fields are present and `null`. The `--reveal` entry, if given, is computed in full. Without `--reveal` nothing is decrypted (labels are cleartext in the vault), and the keyring is touched only with `--allow-prompt`: the root key is then read and dropped, which shows the unlock prompt, so privacy mode can unlock without revealing a code. With `--reveal` only that item is decrypted, under the same lock rules as `codes`. `--reveal` requires `--private`, `--private` excludes `--only`, and an unknown reveal id is `ITEM_NOT_FOUND`.
+- `copy <id> [--clear-after <5..120>] [--demo]` → the helper computes the code itself (the next one if 5 s or fewer remain, the same window the panel marks as urgent) and passes it via stdin to a detached holder: a fresh exec of its own binary (`/proc/self/exe`) that leads a new session and process group, with the scrubbed environment. The holder hands the code to `wl-copy --foreground --sensitive --type text/plain` via stdin and confirms with one status byte once `wl-copy` has read the code and is still running after a 250 ms grace period (an exit within it means the code never reached the clipboard and is an `INTERNAL` error; a missing `wl-copy` is `DEPENDENCY_MISSING`). Only then does `copy` reply and exit, so killing the caller (shell restart, plugin reload) cannot strand the code. The holder keeps `wl-copy` alive until the deadline. If `wl-copy` is still the clipboard owner at the deadline, the holder kills it and runs `wl-copy --clear`. If the user copied something else in the meantime, `wl-copy` has already exited and nothing is cleared. `wl-copy` gets SIGTERM if its holder dies, and a non-zero `wl-copy` exit makes the holder exit with a failure. Descriptors inherited without `FD_CLOEXEC` (Quickshell leaks some) are marked close-on-exec before the holder and `wl-copy` are exec'd. No copy or hash of the code is kept.
 - `hold --clear-after <5..120>` → internal, started only by `copy`: reads one validated code (5–10 digits or a Steam code) from stdin, never the vault or keyring, and answers with a status byte instead of JSON (`MEMLOCK_FAILED` included when its own hardening fails).
 - `prefs get` / `prefs set` → pinned and recent ids plus the privacy flag (see "Stored state").
 - Error codes include `VAULT_NOT_FOUND`, `VAULT_BUSY`, `VAULT_FORMAT_CHANGED`, `KEYRING_LOCKED`, `KEYRING_UNAVAILABLE`, `KEY_NOT_FOUND`, `DECRYPT_FAILED`, `APP_LOCKED`, `UNSAFE_KEY_STORAGE`, `DEPENDENCY_MISSING`, `ITEM_NOT_FOUND`, `INVALID_ARGUMENT`, `MEMLOCK_FAILED`, `TIMEOUT`, `OUTPUT_TOO_LARGE`, `INTERNAL`.
@@ -105,7 +104,8 @@ Each command prints exactly one JSON line, bounded in size, in an envelope `{"ok
 - **Keyring access:**
   - the lock state is read via `/usr/bin/gdbus` (Secret Service `SearchItems`), which never prompts;
   - the root key is read via `/usr/bin/secret-tool lookup` into a zeroizing buffer;
-  - the unlock prompt appears only when the user explicitly presses "Unlock" (`codes --allow-prompt`), and that call gets a longer time budget (120 s) so the password can be typed.
+  - the unlock prompt appears only when the user explicitly presses "Unlock" (`codes --allow-prompt`, with or without `--private`), and that call gets a longer time budget (120 s) so the password can be typed;
+  - known race: without `--allow-prompt` the lock state is checked first and the key read right after; a keyring that locks in that window of a few milliseconds makes `secret-tool` show the prompt anyway. The 10 s budget ends the call, and cancelling the prompt is safe.
 - **Child processes:** absolute paths, a scrubbed environment (`HOME`, `XDG_RUNTIME_DIR`, `WAYLAND_DISPLAY`, `DBUS_SESSION_BUS_ADDRESS` only), their own process group, bounded output, hard timeouts and whole-group kill. Secrets never go through argv or env.
 - **Inputs:** ids validated against `^[A-Za-z0-9._:-]{1,128}$`, flag-like values rejected, all sizes bounded, a global watchdog (10 s; 120 s for the explicit unlock).
 - **Dependencies:** minimal (RustCrypto `aes-gcm`, `hkdf`, `hmac`, `sha1`, `sha2`, plus `zeroize`, `serde`/`serde_json` and `libc`). `Cargo.lock` is committed, builds use `--locked`, and `cargo deny` runs in CI. TOTP/HOTP/Steam are implemented in-house per RFC 6238/4226.
@@ -117,7 +117,7 @@ Each command prints exactly one JSON line, bounded in size, in an envelope `{"ok
 - Codes stay in the model only while the panel is open. Closing the panel clears the model and stops helper calls.
 - No `console.log` of data and no notifications with account names.
 - Copying is done by the helper (`copy <id>`). QML never runs `wl-copy` with a code.
-- Privacy mode (Ctrl+H): only the selected row shows its code, and hidden codes are never loaded into QML. The panel lists and searches rows from `codes --private` and fetches the selected row's code with `codes --private --reveal <id>`.
+- Privacy mode (Ctrl+H): only a row the user chose shows its code, and hidden codes are never loaded into QML. Nothing is revealed on open or while typing: a row is chosen by a keyboard move, Enter or a click, never by the default first-row selection or a resting pointer; Enter or a click on a hidden row reveals it instead of copying. The panel lists and searches rows from `codes --private` and fetches the chosen row's code with `codes --private --reveal <id>`.
 
 ## Project architecture
 
@@ -128,12 +128,11 @@ manifest.json            # Omarchy manifest
 Service.qml              # state and processes (singleton)
 Panel.qml                # rendering only
 components/              # panel components (row, search field, footer, empty states)
-indicators/              # bar icon, visual only
 helper/                  # Rust crate pa-helper
 install.sh
 README.md, LICENSE, preview.png
 docs/                    # specs, plan
-.github/workflows/ci.yml # fmt, clippy, test, cargo deny, memlock budget test
+.github/workflows/ci.yml # fmt, clippy, test, memlock budget test, MSRV build, cargo deny allow-list, node tests, version equality
 ```
 
 ### Helper layers and patterns
@@ -159,8 +158,7 @@ docs/                    # specs, plan
 ### QML layers
 
 - **`Service.qml`**: the single source of truth and an explicit state machine (`Loading → Ready | Error(code)`). It is the only place that runs the helper, through one `HelperClient` wrapper that owns the absolute path, timeouts, size limits, JSON parsing and error mapping.
-- **`Panel.qml` and `components/`**: rendering and keyboard navigation only.
-- **`indicators/`**: renders the `check` status only.
+- **`Panel.qml` and `components/`**: rendering and keyboard navigation only. `Panel.qml`'s own bar button shows the `check` status.
 
 ## Development and review process
 
@@ -194,7 +192,7 @@ Layout **A, a list under the bar**, was chosen.
   - `Ctrl+P` pins or unpins;
   - `Ctrl+H` toggles privacy mode (remembered).
 - **After copying:** a brief "Copied ✓" in the row, then the panel closes (configurable). The clipboard is cleared after 20 s (configurable).
-- **Bar icon:** status only (ready, keyring locked, vault missing, format changed, dependencies missing), from `check`, with no decryption.
+- **Bar icon:** the panel's own button, showing status only (ready, keyring locked, vault missing, format changed, dependencies missing, helper missing or outdated), from `check` and `version`, with no decryption.
 - **Style:** colors and fonts from the current Omarchy theme via the standard UI kit, with no hard-coded colors.
 - **Empty and error states:** no accounts; keyring locked (with Unlock); Proton Authenticator not found; format changed; app lock on; unsafe key storage; helper missing or outdated (with the exact install command).
 - **Demo mode** with fake accounts (public RFC test seeds), for screenshots and UI work. It never touches the vault or the keyring.
@@ -226,7 +224,7 @@ Pinned and recently used accounts are stored as **ids only** (no labels) in `$XD
   - refuses to run when piped (`curl | bash`);
   - never uses `sudo`;
   - names the package to install when something is missing.
-- **Updates:** `omarchy plugin add`/`update` only clone or pull. The service checks the helper's protocol version and shows "Run install.sh" with the exact command when the helper is missing or outdated. Building fetches crates from crates.io, pinned by `Cargo.lock`; this is the only network step and it happens only at install time.
+- **Updates:** `omarchy plugin add`/`update` only clone or pull. The service runs `pa-helper version` at load, after a manifest rescan and after a missing or outdated helper, and compares it with `manifest.version` (CI keeps `helper/Cargo.toml` and `manifest.json` equal); every reply's protocol is checked too. When the helper is missing or outdated it shows "Run install.sh" with the exact command and runs neither `codes` nor `copy`. Building fetches crates from crates.io, pinned by `Cargo.lock`; this is the only network step and it happens only at install time.
 - **Catalog:** listed as "Manual setup". `omarchy-plugin-validate` must pass.
 - **README:**
   - an honest threat model (see "Non-goals");

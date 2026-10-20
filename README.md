@@ -24,11 +24,10 @@ were not audited, and nothing here is a claim about them.
 
   | Package | Used for |
   | --- | --- |
-  | `rustup` (then `rustup default stable`) or `rust` | building the helper (Rust 1.85 or newer) |
+  | `rustup` (then `rustup default stable`) or `rust` | building the helper (Rust 1.89 or newer) |
   | `libsecret` | `/usr/bin/secret-tool`, which reads the vault key from the keyring |
   | `glib2` | `/usr/bin/gdbus`, which asks the keyring whether it is locked |
   | `wl-clipboard` 2.3 or newer | `/usr/bin/wl-copy --sensitive` |
-  | `sqlite` | checked by `install.sh`; only the test suite links it, the helper does not |
 
 - A locked-memory limit (`ulimit -l`) of at least 8192 KiB. That is systemd's default, so
   most systems already have it. See [MEMLOCK_FAILED](#troubleshooting).
@@ -66,8 +65,9 @@ cd ~/.config/omarchy/plugins/sviat.proton-authenticator && ./install.sh
 ```
 
 `omarchy plugin update` only pulls the repository, so re-run `install.sh` after every
-update. If the helper is missing, or too old to speak the panel's protocol, the panel says
-so and offers to copy the exact command.
+update. The panel compares the helper's version with the plugin's: if the helper is
+missing or was built from another version, the panel says so, loads no codes, and offers
+to copy the exact command.
 
 ### Removing
 
@@ -95,7 +95,7 @@ The panel opens with the search field focused. Search is fuzzy over issuer and a
 
 | Key | Action |
 | --- | --- |
-| `Enter` | Copy the selected code (in privacy mode, reveal it first) |
+| `Enter` | Copy the selected code (in privacy mode, a hidden row is revealed first) |
 | `↑` `↓`, `Ctrl+J` `Ctrl+K` | Move the selection |
 | `PgUp` `PgDn` | Move five rows |
 | `Esc` | Clear the search; close the panel when it is already empty |
@@ -104,25 +104,31 @@ The panel opens with the search field focused. Search is fuzzy over issuer and a
 | `Tab`, `Shift+Tab` | Switch to the neighbouring bar panel |
 
 Every action is on a non-letter key or a `Ctrl` chord, so typing never triggers one.
-Clicking a row selects it and copies its code, or reveals it first in privacy mode.
+Clicking a row selects it and copies its code; in privacy mode a hidden row is revealed
+first, and a second click or Enter copies it.
 
-After copying, the row shows "Copied ✓" and the panel closes (`closeOnCopy`). If fewer than 5 seconds of
-the current code remain, the next code is copied instead; the selected row also shows the
-next code during those last seconds. The clipboard is cleared after 20 seconds
+After copying, the row shows "Copied ✓" and the panel closes (`closeOnCopy`). If 5 seconds
+or less of the current code remain, the next code is copied instead; the selected row also
+shows the next code during those last seconds. The clipboard is cleared after 20 seconds
 (`clearClipboardSeconds`), unless you have copied something else in the meantime.
 
 **Order.** Pinned accounts come first, then the five most recently copied, then the rest
 alphabetically. Copying changes the recent order on the next open, so rows never move
 while you are looking at them; pins apply at once.
 
-**Privacy mode** (`Ctrl+H`, remembered) hides every code except the selected row's. Only a
-row selected with the keyboard or a click is revealed; hovering with the mouse does not.
-Hidden codes are not computed at all, not merely masked on screen. The header shows
-`PRIVATE` while it is on.
+**Privacy mode** (`Ctrl+H`, remembered) hides every code except the row you choose. Nothing
+is revealed when the panel opens or while you type: a code appears only once you choose its
+row with `↑` `↓`, `Enter` or a click. Hovering with the mouse highlights a row without
+revealing it. Hidden codes are not computed at all, not merely masked on screen. The header
+shows `PRIVATE` while it is on.
 
 **Unsupported entries** such as HOTP counters are listed as "unsupported" rather than
-breaking the list. TOTP (SHA-1, SHA-256, SHA-512) and Steam codes are supported. A vault
-is read up to 1000 accounts.
+breaking the list. TOTP (SHA-1, SHA-256, SHA-512) and Steam codes are supported.
+
+**Limits.** The plugin reads a vault of at most 1000 items; with more, it lists nothing and
+says "More than 1000 accounts". It also fails closed, showing nothing rather than partial
+data, when the vault database is larger than 2 MiB, when a stored field exceeds 64 KiB, or
+when any single item cannot be read or decrypted.
 
 ### Sync
 
@@ -170,7 +176,8 @@ say what is wrong.
 | --- | --- |
 | Keyring is locked | Press **Unlock** (or Enter). Your keyring's password prompt appears; the plugin never opens it on its own. |
 | Proton Authenticator not found | No vault under `~/.local/share/me.proton.authenticator`. Install the official app, sign in and let it sync once. |
-| Vault format not recognised | The vault did not match the expected format, usually after a Proton Authenticator update. The plugin shows nothing rather than partial data. Codes are still in the official app (**Open Proton**). Update the plugin; if the problem remains, open an issue with the app version. Never attach your vault. |
+| Vault format not recognised | The vault did not match the expected format, usually after a Proton Authenticator update, or after a system WebKitGTK update (the app stores its vault through WebKit's IndexedDB). It is also shown when the vault exceeds the limits above or one item cannot be read. The plugin shows nothing rather than partial data. Codes are still in the official app (**Open Proton**). Update the plugin; if the problem remains, open an issue with the app and WebKitGTK versions. Never attach your vault. |
+| More than 1000 accounts | The vault holds more items than the plugin reads (`OUTPUT_TOO_LARGE`). Use the official app (**Open Proton**). |
 | App lock is on | The official app's PIN/password lock is enabled. The vault key is then derived from that password and is not in the keyring, so the plugin cannot read it (`APP_LOCKED`). Turn the app lock off in the official app to use the plugin. |
 | Proton is storing its key outside the keyring | The app keeps its key in its own database instead of the keyring. The plugin refuses that layout (`UNSAFE_KEY_STORAGE`). Make sure a keyring is running and open the official app; the plugin works once the app stores its key in the keyring. |
 | No Secret Service keyring is running / The vault key is not in the keyring | Start the keyring (`gnome-keyring` on Omarchy) and open the official app once. |
@@ -185,9 +192,12 @@ Priorities, in order: security, reliability, UX, UI. The design and threat model
 
 ### What it protects
 
-- **Secrets live only in a short-lived helper.** TOTP seeds and the vault key exist only
-  inside `pa-helper`, one process per request. The panel (QML) only ever receives ids,
-  issuer and account labels, and current codes. Codes are dropped when the panel closes.
+- **Secrets stay out of the shell.** TOTP seeds and decrypted items exist only inside
+  `pa-helper`, one short-lived process per request. The vault's root key is read from the
+  keyring by `/usr/bin/secret-tool`, so it also passes through the Secret Service, the
+  D-Bus session bus and `secret-tool`'s output pipe on its way into the helper. The panel
+  (QML) only ever receives ids, issuer and account labels, and current codes. Codes are
+  dropped when the panel closes.
 - **The helper is hardened** before it reads anything: it is non-dumpable
   (`PR_SET_DUMPABLE 0`, so no core dumps and no ptrace by other processes of the same
   user), sets `RLIMIT_CORE` to 0, and locks all its memory with `mlockall` so nothing is
@@ -230,6 +240,10 @@ Priorities, in order: security, reliability, UX, UI. The design and threat model
 - **`wl-copy` itself.** It may buffer the copied code in a temporary file of its own while
   it holds the clipboard; that is outside the helper's control.
 - **Pasting.** Once you paste a code, the receiving application has it.
+- **A keyring that locks mid-request.** Without **Unlock** the helper first asks whether
+  the keyring is unlocked and only then reads the key. If the keyring locks in the few
+  milliseconds between the two, the keyring's own unlock prompt can appear without you
+  pressing **Unlock**; the helper gives up after 10 seconds, and cancelling it is safe.
 
 ## Development
 
@@ -237,10 +251,9 @@ Priorities, in order: security, reliability, UX, UI. The design and threat model
 manifest.json      Omarchy plugin manifest
 Service.qml        state and the only place that runs the helper
 HelperClient.qml   runs pa-helper by absolute path, parses its one-line JSON replies
-Panel.qml          bar button and panel, rendering only
+Panel.qml          the bar icon (its own button) and the panel, rendering only
 Model.js           pure logic: ordering, search, states, issuer glyphs
 components/        panel rows, search field, footer, empty states
-indicators/        optional status mark for a cloned omarchy.indicators widget
 helper/            pa-helper, the Rust crate
 tests/             Node tests for Model.js and the panel logic
 install.sh
@@ -266,7 +279,9 @@ reader against. The budget test loads a maximum-size vault and checks that the h
 within an 8 MiB memory-lock limit.
 
 CI (`.github/workflows/ci.yml`) runs `cargo fmt --check`, `clippy` with warnings as errors,
-the tests including the budget test, and `cargo deny`.
+the tests including the budget test, a build on the minimum Rust version, `cargo deny`
+with an allow-list of the reviewed crates, the Node tests, and a check that the helper and
+manifest versions match.
 
 ## License
 
