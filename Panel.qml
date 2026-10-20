@@ -39,7 +39,11 @@ Panel {
   property real clockMs: Date.now()
   readonly property int nowSec: Math.floor(root.clockMs / 1000)
 
-  readonly property var filtered: Model.filterAndOrder(root.entries, root.query, root.prefs)
+  // Recent ids as of opening (null until prefs are known): copying must not
+  // move rows while the panel is open.
+  property var recentSnapshot: null
+  readonly property bool prefsKnown: root.service ? root.service.prefsLoaded : false
+  readonly property var filtered: Model.filterAndOrder(root.entries, root.query, root.prefs, root.recentSnapshot)
   readonly property int selectedIndex: Model.selectionIndex(root.filtered, root.selectedId)
   readonly property var selectedEntry: root.selectedIndex >= 0 ? root.filtered[root.selectedIndex] : null
   // The pointer may move the highlight, but in privacy mode only a keyboard
@@ -112,7 +116,14 @@ Panel {
     root.clockMs = Date.now()
   }
 
+  function takeRecentSnapshot() {
+    root.recentSnapshot = root.opened && root.prefsKnown ? root.prefs.recent.slice() : null
+  }
+
+  onPrefsKnownChanged: if (root.opened && root.recentSnapshot === null) root.takeRecentSnapshot()
+
   onOpenedChanged: {
+    root.takeRecentSnapshot()
     root.resetView()
     root.syncRegistration()
     if (root.opened) Qt.callLater(function() { if (root.opened) searchField.forceActiveFocus() })

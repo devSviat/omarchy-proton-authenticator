@@ -301,3 +301,33 @@ test("footerHints follow what Enter does", () => {
   assert.equal(M.footerHints(null, true, 6).full, "\u21b5 copy \u00b7 ^P pin \u00b7 ^H show")
   assert.equal(M.footerHints(st("constructor"), false, 0).full, "")
 })
+
+test("a copy while open does not move the row; reopening applies it", () => {
+  const entries = [full("a"), full("b"), full("c")]
+  const atOpen = M.emptyPrefs()
+  const snapshot = atOpen.recent.slice()
+  const afterCopy = M.withRecent(atOpen, "c")
+  const ids = (list) => plain(list.map((e) => e.id))
+  assert.deepEqual(ids(M.filterAndOrder(entries, "", afterCopy, snapshot)), ["a", "b", "c"])
+  assert.deepEqual(ids(M.filterAndOrder(entries, "", afterCopy, afterCopy.recent.slice())), ["c", "a", "b"])
+  assert.deepEqual(ids(M.filterAndOrder(entries, "", afterCopy)), ["c", "a", "b"])
+})
+
+test("pinning reorders at once even with a recent snapshot", () => {
+  const entries = [full("a"), full("b"), full("c")]
+  const prefs = M.withRecent(M.emptyPrefs(), "b")
+  const snapshot = prefs.recent.slice()
+  const ids = (list) => plain(list.map((e) => e.id))
+  assert.deepEqual(ids(M.filterAndOrder(entries, "", prefs, snapshot)), ["b", "a", "c"])
+  const pinned = M.withPinned(prefs, "c", true)
+  assert.deepEqual(ids(M.filterAndOrder(entries, "", pinned, snapshot)), ["c", "b", "a"])
+  const unpinned = M.withPinned(pinned, "c", false)
+  assert.deepEqual(ids(M.filterAndOrder(entries, "", unpinned, snapshot)), ["b", "a", "c"])
+})
+
+test("search ties follow the snapshot, not the live recent list", () => {
+  const entries = [full("a", { issuer: "Gamma" }), full("b", { issuer: "Gold" })]
+  const ids = (list) => plain(list.map((e) => e.id))
+  assert.deepEqual(ids(M.filterAndOrder(entries, "g", M.withRecent(M.emptyPrefs(), "b"), [])), ["a", "b"])
+  assert.deepEqual(ids(M.filterAndOrder(entries, "g", M.emptyPrefs(), ["b"])), ["b", "a"])
+})

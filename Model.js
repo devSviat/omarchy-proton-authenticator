@@ -237,8 +237,13 @@ function entryScore(entry, query) {
   return Math.max(fuzzyScore(entry.issuer, query), Math.min(2, fuzzyScore(entry.account, query)))
 }
 
-function filterAndOrder(entries, query, prefs) {
-  var ordered = defaultOrder(Array.isArray(entries) ? entries : [], prefs)
+// recentSnapshot: the recent ids as they were when the panel opened. Copying
+// records a recent id at once, but the row only moves on the next open, so it
+// never jumps away from under the user. Pins always apply immediately.
+function filterAndOrder(entries, query, prefs, recentSnapshot) {
+  var p = normalizePrefs(prefs)
+  if (Array.isArray(recentSnapshot)) p.recent = recentSnapshot.filter(validId).slice(0, RECENT_MAX)
+  var ordered = defaultOrder(Array.isArray(entries) ? entries : [], p)
   if (lower(query).trim() === "") return ordered
   var q = lower(query).trim()
   var scored = []
