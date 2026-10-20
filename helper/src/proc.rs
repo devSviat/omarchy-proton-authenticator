@@ -1,8 +1,9 @@
 use std::io::{Read, Write};
 use std::os::unix::process::CommandExt;
 use std::path::Path;
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::sync::{Mutex, MutexGuard};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -50,9 +51,51 @@ pub(crate) fn child_pgid(child: &Child) -> Result<i32> {
     i32::try_from(child.id()).map_err(|_| ErrorCode::Internal)
 }
 
+/// Process groups of children spawned and not yet reaped. Spawning, reaping
+/// and [`kill_active_groups`] all hold this lock, so a recorded group id always
+/// names one of our live or zombie children, never a reused pid.
+static ACTIVE_GROUPS: Mutex<Vec<i32>> = Mutex::new(Vec::new());
+
+fn active_groups() -> MutexGuard<'static, Vec<i32>> {
+    ACTIVE_GROUPS.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Spawns `command` (built by [`scrubbed_command`], so the child leads its own
+/// group) and records its group for [`kill_active_groups`].
+pub(crate) fn spawn_tracked(command: &mut Command) -> Result<Child> {
+    let mut groups = active_groups();
+    let child = command.spawn().map_err(|e| spawn_error(&e))?;
+    match child_pgid(&child) {
+        Ok(pgid) => groups.push(pgid),
+        Err(e) => {
+            drop(groups);
+            let mut child = child;
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(e);
+        }
+    }
+    Ok(child)
+}
+
+fn untrack(groups: &mut Vec<i32>, child: &Child) {
+    if let Ok(pgid) = child_pgid(child) {
+        groups.retain(|g| *g != pgid);
+    }
+}
+
+/// Reaps a child started by [`spawn_tracked`] and forgets its group.
+pub(crate) fn reap(child: &mut Child) -> Result<ExitStatus> {
+    let mut groups = active_groups();
+    untrack(&mut groups, child);
+    child.wait().map_err(|_| ErrorCode::Internal)
+}
+
 /// Kills the child's whole process group, then reaps the child. The child is
 /// still unreaped here, so its pid cannot have been reused as another group id.
 pub(crate) fn kill_and_reap(child: &mut Child) {
+    let mut groups = active_groups();
+    untrack(&mut groups, child);
     match child_pgid(child) {
         Ok(pgid) => {
             let _ = sys::kill_process_group(pgid, Signal::Kill);
@@ -62,6 +105,17 @@ pub(crate) fn kill_and_reap(child: &mut Child) {
         }
     }
     let _ = child.wait();
+}
+
+/// SIGKILLs every group recorded by [`spawn_tracked`] and returns the lock, so
+/// no child can be spawned or reaped until the caller drops it. Meant for a
+/// caller that is about to end the process.
+pub fn kill_active_groups() -> MutexGuard<'static, Vec<i32>> {
+    let groups = active_groups();
+    for pgid in groups.iter() {
+        let _ = sys::kill_process_group(*pgid, Signal::Kill);
+    }
+    groups
 }
 
 /// Runs `program` by absolute path with a scrubbed environment and returns
@@ -95,7 +149,7 @@ pub fn run_bounded(
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
 
-    let mut child = command.spawn().map_err(|e| spawn_error(&e))?;
+    let mut child = spawn_tracked(&mut command)?;
 
     let result = drive(&mut child, stdin, max_out, deadline);
     if result.is_err() {
@@ -157,7 +211,7 @@ fn wait_for_both(
         }
         if exited {
             if let Some(buf) = output.take() {
-                let status = child.wait().map_err(|_| ErrorCode::Internal)?;
+                let status = reap(child)?;
                 return Ok((status.code().unwrap_or(-1), buf));
             }
         }

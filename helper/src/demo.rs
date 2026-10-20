@@ -11,6 +11,10 @@ const SEED_SHA1: &[u8] = b"12345678901234567890";
 const SEED_SHA256: &[u8] = b"12345678901234567890123456789012";
 const SEED_SHA512: &[u8] = b"1234567890123456789012345678901234567890123456789012345678901234";
 
+/// Fixed so a UI that reloads on a changed vault mtime does not reload on
+/// every demo poll. 2026-01-01T00:00:00Z.
+pub const VAULT_MTIME: u64 = 1_767_225_600;
+
 struct DemoAccount {
     id: &'static str,
     issuer: &'static str,

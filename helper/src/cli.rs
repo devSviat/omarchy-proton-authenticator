@@ -18,13 +18,47 @@ use crate::error::{ErrorCode, Result};
 use crate::keyring::{SecretToolKeys, SECRET_TOOL};
 use crate::output::{render, render_err, Rendered};
 use crate::prefs::{self, Prefs};
+use crate::proc;
 use crate::sys;
 use crate::vault::ProtonIdbVault;
 use crate::watchdog::Watchdog;
 
-/// Upper bound on one helper run, except the clipboard hold after `copy`
-/// has replied, which has its own deadline.
-pub const RUN_TIMEOUT: Duration = Duration::from_secs(10);
+/// Upper bounds on one helper run. The clipboard hold after `copy` has
+/// replied is not covered; it has its own deadline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Timeouts {
+    pub run: Duration,
+    /// For `codes --allow-prompt`, both the whole run and the keyring lookup:
+    /// that lookup waits for the user to answer an unlock prompt.
+    pub prompt: Duration,
+}
+
+pub const TIMEOUTS: Timeouts = Timeouts {
+    run: Duration::from_secs(10),
+    prompt: Duration::from_secs(120),
+};
+
+impl Timeouts {
+    pub fn for_command(&self, command: &Command) -> Duration {
+        match command {
+            Command::Codes {
+                allow_prompt: true,
+                demo: false,
+                ..
+            } => self.prompt,
+            _ => self.run,
+        }
+    }
+
+    pub fn keys(&self, allow_prompt: bool) -> SecretToolKeys {
+        if allow_prompt {
+            SecretToolKeys::with_lookup_timeout(self.prompt)
+        } else {
+            SecretToolKeys::new()
+        }
+    }
+}
+
 const CLEAR_AFTER_SECS: RangeInclusive<u64> = 5..=120;
 const DEFAULT_CLEAR_AFTER_SECS: u64 = 20;
 const READY: &str = "READY";
@@ -77,9 +111,10 @@ fn set_once(flag: &mut bool) -> Result<()> {
     Ok(())
 }
 
+/// Ids that start with `-` are refused so a flag can never be taken for an id.
 fn item_id(arg: Option<&str>) -> Result<String> {
     match arg {
-        Some(id) if valid_item_id(id) => Ok(id.to_owned()),
+        Some(id) if valid_item_id(id) && !id.starts_with('-') => Ok(id.to_owned()),
         _ => Err(ErrorCode::InvalidArgument),
     }
 }
@@ -166,7 +201,7 @@ fn check(demo: bool) -> Result<CheckBody> {
     if demo {
         return Ok(CheckBody {
             status: READY,
-            vault_mtime: Some(unix_now()?),
+            vault_mtime: Some(demo::VAULT_MTIME),
         });
     }
     let report = match real_vault() {
@@ -186,7 +221,12 @@ fn check(demo: bool) -> Result<CheckBody> {
     })
 }
 
-fn codes(only: Option<String>, allow_prompt: bool, demo: bool) -> Result<CodesBody> {
+fn codes(
+    only: Option<String>,
+    allow_prompt: bool,
+    demo: bool,
+    timeouts: &Timeouts,
+) -> Result<CodesBody> {
     let now = unix_now()?;
     let entries = if demo {
         let mut entries = demo::entries(now);
@@ -203,7 +243,7 @@ fn codes(only: Option<String>, allow_prompt: bool, demo: bool) -> Result<CodesBo
             allow_prompt,
             unix: now,
         };
-        app::codes(&real_vault()?, &SecretToolKeys::new(), &req)?
+        app::codes(&real_vault()?, &timeouts.keys(allow_prompt), &req)?
     };
     Ok(CodesBody { now, entries })
 }
@@ -232,8 +272,11 @@ pub fn emit(line: &str) {
     let _ = out.flush();
 }
 
-/// The watchdog's action: report `TIMEOUT` and end the process.
+/// The watchdog's action: kill the running child's process group, report
+/// `TIMEOUT` and end the process. The guard keeps any other child from being
+/// spawned until the process is gone.
 pub fn time_out() {
+    let _frozen = proc::kill_active_groups();
     emit(&render_err(ErrorCode::Timeout));
     std::process::exit(1);
 }
@@ -254,7 +297,8 @@ fn finish(watchdog: Watchdog, reply: Rendered) -> ExitCode {
     exit_code(reply.ok)
 }
 
-/// Replies first, then holds the clipboard from a detached session with
+/// Puts the code on the clipboard before replying, so a missing or failing
+/// wl-copy is still reported. Then holds it from a detached session with
 /// stdout closed, so the caller sees EOF and is free to exit while the code
 /// is still on the clipboard.
 fn copy(
@@ -263,55 +307,65 @@ fn copy(
     demo: bool,
     clipboard: &dyn Clipboard,
     watchdog: Watchdog,
+    timeouts: &Timeouts,
 ) -> ExitCode {
-    let picked = codes(Some(id), false, demo)
+    let started = codes(Some(id), false, demo, timeouts)
         .and_then(|body| {
             body.entries
                 .into_iter()
                 .next()
                 .ok_or(ErrorCode::ItemNotFound)
         })
-        .and_then(app::copy_code);
-    let code = match picked {
-        Ok(code) => code,
+        .and_then(app::copy_code)
+        .and_then(|code| clipboard.start(code, clear_after));
+    let hold = match started {
+        Ok(hold) => hold,
         Err(e) => return finish(watchdog, render::<EmptyBody>(Err(e))),
     };
     finish(watchdog, render(Ok(EmptyBody {})));
     if sys::close_stdout().is_err() || sys::detach_session().is_err() {
+        hold.abort();
         return ExitCode::FAILURE;
     }
-    exit_code(clipboard.hold(code, clear_after).is_ok())
+    exit_code(hold.wait_and_clear().is_ok())
 }
 
-/// Runs one helper invocation after `harden()`: arms a watchdog that ends the
-/// process with `TIMEOUT` after `timeout`, parses `args` (without the program
-/// name), dispatches, and writes the reply.
-pub fn run(args: &[OsString], clipboard: &dyn Clipboard, timeout: Duration) -> ExitCode {
-    let watchdog = match Watchdog::arm(timeout, time_out) {
+/// Runs one helper invocation after `harden()`: parses `args` (without the
+/// program name), arms a watchdog that ends the process with `TIMEOUT` once
+/// the command's budget from `timeouts` is spent, dispatches, and writes the
+/// reply.
+pub fn run(args: &[OsString], clipboard: &dyn Clipboard, timeouts: &Timeouts) -> ExitCode {
+    let command = match parse(args) {
+        Ok(command) => command,
+        Err(e) => {
+            emit(&render_err(e));
+            return ExitCode::FAILURE;
+        }
+    };
+    let watchdog = match Watchdog::arm(timeouts.for_command(&command), time_out) {
         Ok(watchdog) => watchdog,
         Err(e) => {
             emit(&render_err(e));
             return ExitCode::FAILURE;
         }
     };
-    let reply = match parse(args) {
-        Err(e) => render::<EmptyBody>(Err(e)),
-        Ok(Command::Version) => render(Ok(VersionBody {
+    let reply = match command {
+        Command::Version => render(Ok(VersionBody {
             version: env!("CARGO_PKG_VERSION"),
         })),
-        Ok(Command::Check { demo }) => render(check(demo)),
-        Ok(Command::Codes {
+        Command::Check { demo } => render(check(demo)),
+        Command::Codes {
             only,
             allow_prompt,
             demo,
-        }) => render(codes(only, allow_prompt, demo)),
-        Ok(Command::Copy {
+        } => render(codes(only, allow_prompt, demo, timeouts)),
+        Command::Copy {
             id,
             clear_after,
             demo,
-        }) => return copy(id, clear_after, demo, clipboard, watchdog),
-        Ok(Command::PrefsGet) => render(prefs::default_dir().and_then(|dir| prefs::load(&dir))),
-        Ok(Command::PrefsSet) => render(prefs_set()),
+        } => return copy(id, clear_after, demo, clipboard, watchdog, timeouts),
+        Command::PrefsGet => render(prefs::default_dir().and_then(|dir| prefs::load(&dir))),
+        Command::PrefsSet => render(prefs_set()),
     };
     finish(watchdog, reply)
 }
@@ -358,6 +412,54 @@ mod tests {
         );
         assert_eq!(parse_strs(&["prefs", "get"]), Ok(Command::PrefsGet));
         assert_eq!(parse_strs(&["prefs", "set"]), Ok(Command::PrefsSet));
+    }
+
+    #[test]
+    fn allow_prompt_gets_the_prompt_budget() {
+        let timeouts = Timeouts {
+            run: Duration::from_secs(3),
+            prompt: Duration::from_secs(7),
+        };
+        let budget = |args: &[&str]| timeouts.for_command(&parse_strs(args).unwrap());
+        assert_eq!(budget(&["codes", "--allow-prompt"]), timeouts.prompt);
+        assert_eq!(
+            budget(&["codes", "--only", "x", "--allow-prompt"]),
+            timeouts.prompt
+        );
+        assert_eq!(budget(&["codes"]), timeouts.run);
+        assert_eq!(budget(&["codes", "--allow-prompt", "--demo"]), timeouts.run);
+        assert_eq!(budget(&["copy", "x"]), timeouts.run);
+        assert_eq!(budget(&["check"]), timeouts.run);
+        assert_eq!(budget(&["prefs", "set"]), timeouts.run);
+        assert_eq!(timeouts.keys(true).lookup_timeout(), timeouts.prompt);
+        assert_eq!(
+            timeouts.keys(false).lookup_timeout(),
+            Duration::from_secs(10)
+        );
+    }
+
+    #[test]
+    fn shipped_budgets() {
+        assert_eq!(TIMEOUTS.run, Duration::from_secs(10));
+        assert_eq!(TIMEOUTS.prompt, Duration::from_secs(120));
+    }
+
+    #[test]
+    fn flags_are_never_taken_for_ids() {
+        for args in [
+            &["copy", "--demo"][..],
+            &["copy", "--clear-after", "5"],
+            &["copy", "-x", "--demo"],
+            &["codes", "--only", "--demo"],
+            &["codes", "--only", "--allow-prompt"],
+            &["codes", "--only", "-"],
+        ] {
+            assert_eq!(
+                parse_strs(args),
+                Err(ErrorCode::InvalidArgument),
+                "{args:?}"
+            );
+        }
     }
 
     #[test]

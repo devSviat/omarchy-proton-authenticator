@@ -299,9 +299,33 @@ fn check_demo_is_ready() {
     if !memlock_fits() {
         return;
     }
-    let value = reply(&Sandbox::new().run(&["check", "--demo"]));
-    assert_eq!(value["status"], "READY");
-    assert!(value["vaultMtime"].as_u64().is_some());
+    let sandbox = Sandbox::new();
+    let first = line(&sandbox.run(&["check", "--demo"]));
+    assert_eq!(
+        first,
+        r#"{"ok":true,"protocol":1,"status":"READY","vaultMtime":1767225600}"#
+    );
+    std::thread::sleep(Duration::from_millis(1100));
+    assert_eq!(line(&sandbox.run(&["check", "--demo"])), first);
+}
+
+#[test]
+fn flags_are_never_taken_for_ids() {
+    if !memlock_fits() {
+        return;
+    }
+    // HOME has no vault: reading it would answer VAULT_NOT_FOUND instead.
+    let sandbox = Sandbox::new();
+    assert_eq!(error_of(&sandbox.run(&["codes"])), "VAULT_NOT_FOUND");
+    let cases: &[&[&str]] = &[
+        &["copy", "--demo"],
+        &["copy", "--clear-after", "5"],
+        &["codes", "--only", "--demo"],
+        &["codes", "--only", "--allow-prompt"],
+    ];
+    for args in cases {
+        assert_eq!(error_of(&sandbox.run(args)), "INVALID_ARGUMENT", "{args:?}");
+    }
 }
 
 fn mode(path: &Path) -> u32 {

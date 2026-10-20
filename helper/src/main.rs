@@ -14,5 +14,5 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
-    cli::run(&args, &WlCopy::default(), cli::RUN_TIMEOUT)
+    cli::run(&args, &WlCopy::default(), &cli::TIMEOUTS)
 }

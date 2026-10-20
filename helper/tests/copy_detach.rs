@@ -17,19 +17,37 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use pa_helper::cli;
 use pa_helper::clipboard::WlCopy;
 use pa_helper::otp::{totp, Algorithm};
+use pa_helper::proc::run_bounded;
+use pa_helper::sys::process_group_exists;
+use pa_helper::watchdog::Watchdog;
 
 const CHILD: &str = "--child";
+const BOUNDED_CHILD: &str = "--bounded-child";
 const RFC6238_SHA1_SEED: &[u8] = b"12345678901234567890";
 
+fn millis(arg: Option<OsString>) -> Duration {
+    Duration::from_millis(arg.unwrap().into_string().unwrap().parse().unwrap())
+}
+
 fn child(mut args: impl Iterator<Item = OsString>) -> ExitCode {
-    let timeout_ms: u64 = args.next().unwrap().into_string().unwrap().parse().unwrap();
+    let timeout = millis(args.next());
     let wl_copy = PathBuf::from(args.next().unwrap());
     let rest: Vec<OsString> = args.collect();
-    cli::run(
-        &rest,
-        &WlCopy::new(wl_copy),
-        Duration::from_millis(timeout_ms),
-    )
+    let timeouts = cli::Timeouts {
+        run: timeout,
+        prompt: timeout,
+    };
+    cli::run(&rest, &WlCopy::new(wl_copy), &timeouts)
+}
+
+/// Runs `program` through `run_bounded` with a long timeout of its own, under
+/// a watchdog that expires first.
+fn bounded_child(mut args: impl Iterator<Item = OsString>) -> ExitCode {
+    let timeout = millis(args.next());
+    let program = PathBuf::from(args.next().unwrap());
+    let _watchdog = Watchdog::arm(timeout, cli::time_out).unwrap();
+    let _ = run_bounded(&program, &[], None, 64, Duration::from_secs(60));
+    ExitCode::SUCCESS
 }
 
 fn fake_wl_copy(dir: &Path) -> PathBuf {
@@ -189,17 +207,91 @@ fn stalled_run_times_out() {
     assert!(!dir.path().join("sviat.proton-authenticator").exists());
 }
 
+fn missing_wl_copy_is_reported() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut child = Command::new(std::env::current_exe().unwrap())
+        .env_clear()
+        .args([CHILD, "5000"])
+        .arg(dir.path().join("wl-copy"))
+        .args(["copy", "demo-github", "--demo"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let run = read_until_eof(&mut child);
+    let status = wait_exit(&mut child, Duration::from_secs(2));
+    assert_eq!(
+        run.stdout,
+        "{\"ok\":false,\"protocol\":1,\"error\":\"DEPENDENCY_MISSING\"}\n"
+    );
+    assert_eq!(status.code(), Some(1));
+}
+
+fn wait_group_gone(pgid: i32) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < deadline {
+        if !process_group_exists(pgid) {
+            return true;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    false
+}
+
+fn watchdog_kills_the_running_child_group() {
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path().display();
+    let program = dir.path().join("slow");
+    fs::write(
+        &program,
+        format!("#!/bin/sh\necho $$ > {d}/pid\n/usr/bin/sleep 300 &\nwait\n"),
+    )
+    .unwrap();
+    fs::set_permissions(&program, fs::Permissions::from_mode(0o700)).unwrap();
+
+    let start = Instant::now();
+    let mut child = Command::new(std::env::current_exe().unwrap())
+        .env_clear()
+        .args([BOUNDED_CHILD, "500"])
+        .arg(&program)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let run = read_until_eof(&mut child);
+    let status = wait_exit(&mut child, Duration::from_secs(2));
+    assert_eq!(
+        run.stdout,
+        "{\"ok\":false,\"protocol\":1,\"error\":\"TIMEOUT\"}\n"
+    );
+    assert_eq!(status.code(), Some(1));
+    assert!(start.elapsed() < Duration::from_secs(3));
+    let pgid: i32 = fs::read_to_string(dir.path().join("pid"))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    assert!(wait_group_gone(pgid), "child group {pgid} survived");
+}
+
 fn main() -> ExitCode {
     let mut args = std::env::args_os().skip(1);
-    if args.next().as_deref() == Some(CHILD.as_ref()) {
-        return child(args);
+    match args.next() {
+        Some(mode) if mode == CHILD => return child(args),
+        Some(mode) if mode == BOUNDED_CHILD => return bounded_child(args),
+        _ => {}
     }
-    let tests: [(&str, fn()); 3] = [
+    let tests: [(&str, fn()); 5] = [
         ("copy_replies_then_holds", || copy_replies_then_holds(false)),
         ("copy_as_group_leader_replies_then_holds", || {
             copy_replies_then_holds(true)
         }),
         ("stalled_run_times_out", stalled_run_times_out),
+        ("missing_wl_copy_is_reported", missing_wl_copy_is_reported),
+        (
+            "watchdog_kills_the_running_child_group",
+            watchdog_kills_the_running_child_group,
+        ),
     ];
     for (name, test) in tests {
         test();

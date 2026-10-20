@@ -23,14 +23,26 @@ const KEY_ID_MAX_LEN: usize = 128;
 pub struct SecretToolKeys {
     gdbus: PathBuf,
     secret_tool: PathBuf,
+    lookup_timeout: Duration,
 }
 
 impl SecretToolKeys {
     pub fn new() -> Self {
+        Self::with_lookup_timeout(SECRET_TOOL_TIMEOUT)
+    }
+
+    /// `lookup_timeout` bounds the `secret-tool lookup` call, which may wait
+    /// for the user to answer an unlock prompt.
+    pub fn with_lookup_timeout(lookup_timeout: Duration) -> Self {
         Self {
             gdbus: PathBuf::from(GDBUS),
             secret_tool: PathBuf::from(SECRET_TOOL),
+            lookup_timeout,
         }
+    }
+
+    pub fn lookup_timeout(&self) -> Duration {
+        self.lookup_timeout
     }
 }
 
@@ -94,7 +106,7 @@ impl KeyProvider for SecretToolKeys {
             &["lookup", "service", SERVICE, "username", key_id],
             None,
             SECRET_TOOL_MAX_OUT,
-            SECRET_TOOL_TIMEOUT,
+            self.lookup_timeout,
         )?;
         if code != 0 {
             return Err(ErrorCode::KeyNotFound);
@@ -231,6 +243,7 @@ mod tests {
         let keys = SecretToolKeys {
             gdbus: PathBuf::from("/nonexistent/gdbus"),
             secret_tool: PathBuf::from("/nonexistent/secret-tool"),
+            lookup_timeout: SECRET_TOOL_TIMEOUT,
         };
         for id in ["", "a'b", "a b", "-lead", ".lead", "a\n", &"x".repeat(129)] {
             assert_eq!(
@@ -247,11 +260,44 @@ mod tests {
         let keys = SecretToolKeys {
             gdbus: PathBuf::from("/nonexistent/gdbus"),
             secret_tool: PathBuf::from("/nonexistent/secret-tool"),
+            lookup_timeout: SECRET_TOOL_TIMEOUT,
         };
         assert_eq!(keys.lock_state("abc"), Err(ErrorCode::DependencyMissing));
         assert_eq!(
             keys.root_key("abc").unwrap_err(),
             ErrorCode::DependencyMissing
         );
+    }
+
+    #[test]
+    fn lookup_uses_its_own_timeout() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::time::Instant;
+
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("secret-tool");
+        std::fs::write(&script, "#!/bin/sh\n/usr/bin/sleep 5\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let keys = SecretToolKeys {
+            gdbus: PathBuf::from("/nonexistent/gdbus"),
+            secret_tool: script,
+            lookup_timeout: Duration::from_millis(300),
+        };
+        // Another test thread forking while the script was open for writing
+        // makes exec fail with ETXTBSY (reported as Internal) until it execs.
+        for _ in 0..20 {
+            let start = Instant::now();
+            match keys.root_key("abc") {
+                Err(ErrorCode::Internal) => std::thread::sleep(Duration::from_millis(50)),
+                other => {
+                    assert_eq!(other.unwrap_err(), ErrorCode::Timeout);
+                    let elapsed = start.elapsed();
+                    assert!(elapsed >= Duration::from_millis(300), "{elapsed:?}");
+                    assert!(elapsed < Duration::from_secs(3), "{elapsed:?}");
+                    return;
+                }
+            }
+        }
+        panic!("fake secret-tool never ran");
     }
 }
