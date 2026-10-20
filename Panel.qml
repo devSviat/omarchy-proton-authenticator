@@ -48,7 +48,6 @@ Panel {
     status: root.status,
     entryCount: root.entries.length,
     matchCount: root.filtered.length,
-    query: root.query,
     codesRunning: root.service ? root.service.codesRunning : false,
     promptRunning: root.service ? root.service.promptRunning : false,
     pluginDir: root.service ? root.service.pluginDir : ""
@@ -99,11 +98,12 @@ Panel {
     root.feedbackText = ""
     feedbackTimer.stop()
     revealDebounce.stop()
+    refreshTimer.stop()
     root.clockMs = Date.now()
   }
 
   onOpenedChanged: {
-    if (root.opened) root.resetView()
+    root.resetView()
     root.syncRegistration()
     if (root.opened) Qt.callLater(function() { if (root.opened) searchField.forceActiveFocus() })
   }
@@ -115,20 +115,37 @@ Panel {
   Component.onCompleted: root.applyDemo()
   Component.onDestruction: if (root.registeredWith) root.registeredWith.panelClosed(root)
 
+  function decide(trigger) {
+    return Model.loadDecision({
+      trigger: trigger,
+      opened: root.opened && !!root.service,
+      status: root.status,
+      last: root.service ? root.service.lastRequest : null,
+      wanted: root.wantedRequest
+    })
+  }
+
   // Switching privacy reloads at once (turning it on must drop codes now);
   // walking the list only reveals the row the selection settles on.
-  onWantedRequestChanged: {
-    if (!root.opened || !root.service) return
-    var last = root.service.lastRequest
-    if (Model.sameRequest(root.wantedRequest, last)) {
-      revealDebounce.stop()
-    } else if (!last || last.privateMode !== root.wantedRequest.privateMode) {
-      revealDebounce.stop()
-      root.service.loadCodes(root.wantedRequest)
-    } else {
+  function reconcile() {
+    if (root.opened && root.service && root.wantedRequest.privateMode)
+      root.service.hideExcept(root.wantedRequest.revealId)
+    var decision = root.decide("change")
+    if (decision === "debounce") {
       revealDebounce.restart()
+      return
     }
+    revealDebounce.stop()
+    if (decision === "now") root.service.loadCodes(root.wantedRequest)
   }
+
+  function revealNow() {
+    revealDebounce.stop()
+    if (root.decide("change") !== "none") root.service.loadCodes(root.wantedRequest)
+  }
+
+  onWantedRequestChanged: root.reconcile()
+  onStatusChanged: root.reconcile()
 
   onQueryChanged: root.selectedId = ""
 
@@ -146,10 +163,7 @@ Panel {
   Timer {
     id: revealDebounce
     interval: 150
-    onTriggered: {
-      if (root.opened && root.service && !Model.sameRequest(root.wantedRequest, root.service.lastRequest))
-        root.service.loadCodes(root.wantedRequest)
-    }
+    onTriggered: if (root.decide("change") !== "none") root.service.loadCodes(root.wantedRequest)
   }
 
   // One helper call per period boundary; the rings in between run on the
@@ -157,7 +171,7 @@ Panel {
   Timer {
     id: refreshTimer
     repeat: false
-    onTriggered: if (root.opened && root.service) root.service.loadCodes(root.wantedRequest)
+    onTriggered: if (root.decide("refresh") === "now") root.service.loadCodes(root.wantedRequest)
   }
 
   Timer {
@@ -179,6 +193,7 @@ Panel {
   }
 
   function move(delta) {
+    pointerGate.reset()
     var next = Model.moveSelection(root.filtered, root.selectedId, delta)
     if (next !== "") root.selectedId = next
   }
@@ -196,8 +211,15 @@ Panel {
   }
 
   function activate() {
-    if (root.emptyState !== null) root.runAction(root.emptyState.action)
-    else root.copyEntry(root.selectedEntry)
+    if (root.emptyState !== null && root.emptyState.action !== "") root.runAction(root.emptyState.action)
+    else root.useEntry(root.selectedEntry)
+  }
+
+  // A row still hidden by privacy mode is revealed first, never copied blind.
+  function useEntry(entry) {
+    if (!entry) return
+    if (Model.isHidden(entry)) root.revealNow()
+    else root.copyEntry(entry)
   }
 
   function copyEntry(entry) {
@@ -298,9 +320,19 @@ Panel {
         onTabRequested: function(direction) { root.switchPanel(direction) }
       }
 
+      EmptyState {
+        visible: root.emptyState !== null
+        width: parent.width
+        info: root.emptyState
+        foreground: root.foreground
+        dim: root.dim
+        fontFamily: root.fontFamily
+        onActionRequested: function(action) { root.runAction(action) }
+      }
+
       ListView {
         id: list
-        visible: root.emptyState === null
+        visible: root.filtered.length > 0
         width: parent.width
         height: visible ? Math.min(contentHeight, Style.space(54) * 7) : 0
         spacing: Style.space(2)
@@ -310,7 +342,18 @@ Panel {
         model: root.filtered
         currentIndex: root.selectedIndex
         highlightFollowsCurrentItem: false
-        onCurrentIndexChanged: if (currentIndex >= 0) positionViewAtIndex(currentIndex, ListView.Contain)
+        function keepSelectionInView() {
+          if (root.selectedIndex >= 0) list.positionViewAtIndex(root.selectedIndex, ListView.Contain)
+        }
+        // Every reply replaces the model, which resets the scroll position.
+        onCurrentIndexChanged: keepSelectionInView()
+        onCountChanged: Qt.callLater(keepSelectionInView)
+        onModelChanged: {
+          pointerGate.reset()
+          Qt.callLater(keepSelectionInView)
+        }
+
+        PointerMoveGate { id: pointerGate; referenceItem: list }
 
         delegate: EntryRow {
           required property var modelData
@@ -326,21 +369,14 @@ Panel {
           dim: root.dim
           urgentColor: root.urgent
           fontFamily: root.fontFamily
+          onPointerMoved: function(row, mouse) {
+            if (pointerGate.moved(row, mouse)) root.selectedId = modelData.id
+          }
           onClicked: {
             root.selectedId = modelData.id
-            root.copyEntry(modelData)
+            root.useEntry(modelData)
           }
         }
-      }
-
-      EmptyState {
-        visible: root.emptyState !== null
-        width: parent.width
-        info: root.emptyState
-        foreground: root.foreground
-        dim: root.dim
-        fontFamily: root.fontFamily
-        onActionRequested: function(action) { root.runAction(action) }
       }
 
       PanelSeparator { foreground: root.foreground }

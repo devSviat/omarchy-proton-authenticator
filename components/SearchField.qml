@@ -20,7 +20,7 @@ TextField {
   signal tabRequested(int direction)
 
   placeholderText: "Search accounts"
-  rightPadding: horizontalPadding + countLabel.implicitWidth + Style.space(8)
+  rightPadding: horizontalPadding + Border.right(root._borderSpec) + countLabel.implicitWidth + Style.space(8)
 
   Keys.onPressed: function(event) {
     var ctrl = (event.modifiers & Qt.ControlModifier) !== 0

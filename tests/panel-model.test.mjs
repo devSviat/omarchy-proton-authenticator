@@ -104,7 +104,7 @@ test("maskedCode is grouped bullets", () => {
 
 test("canCopy refuses unsupported entries", () => {
   assert.equal(M.canCopy(full("a")), true)
-  assert.equal(M.canCopy(hidden("a")), true)
+  assert.equal(M.canCopy(hidden("a")), false)
   assert.equal(M.canCopy(full("a", { kind: "unsupported" })), false)
   assert.equal(M.canCopy(null), false)
 })
@@ -116,7 +116,7 @@ test("shellQuote wraps in single quotes", () => {
 
 test("emptyState maps every status", () => {
   const s = (status, extra) => M.emptyState(Object.assign({
-    status, entryCount: 0, matchCount: 0, query: "", codesRunning: false,
+    status, entryCount: 0, matchCount: 0, codesRunning: false,
     promptRunning: false, pluginDir: "/p"
   }, extra || {}))
   assert.deepEqual(plain(s("KEYRING_LOCKED")), { title: "Keyring is locked", detail: "", action: "unlock", actionLabel: "Unlock" })
@@ -140,7 +140,7 @@ test("emptyState maps every status", () => {
   assert.equal(s("READY").action, "openProton")
   assert.equal(s("READY", { codesRunning: true }).title, "Loading…")
   assert.equal(s("LOADING").title, "Loading…")
-  assert.equal(s("READY", { entryCount: 3, query: "zz" }).title, "No matches")
+  assert.equal(s("READY", { entryCount: 3 }).title, "No matches")
   assert.equal(s("READY", { entryCount: 3, matchCount: 3 }), null)
   assert.equal(s("TIMEOUT").title, M.statusText("TIMEOUT"))
   assert.equal(s("TIMEOUT").action, "retry")
@@ -172,4 +172,45 @@ test("heroBadge prefers privacy over demo", () => {
   assert.equal(M.heroBadge(true, true), "PRIVATE")
   assert.equal(M.heroBadge(false, true), "DEMO")
   assert.equal(M.heroBadge(false, false), "")
+})
+
+test("loadDecision: privacy switches load now, selection moves debounce", () => {
+  const d = (extra) => M.loadDecision(Object.assign({
+    trigger: "change", opened: true, status: "READY",
+    last: M.codesRequest(true, "a"), wanted: M.codesRequest(true, "b")
+  }, extra || {}))
+  assert.equal(d(), "debounce")
+  assert.equal(d({ wanted: M.codesRequest(true, "a") }), "none")
+  assert.equal(d({ wanted: M.codesRequest(false, "") }), "now")
+  assert.equal(d({ last: null }), "now")
+  assert.equal(d({ opened: false }), "none")
+})
+
+test("loadDecision never retries while the status is an error", () => {
+  for (const status of ["KEYRING_LOCKED", "DECRYPT_FAILED", "KEY_NOT_FOUND", "KEYRING_UNAVAILABLE", "LOADING"]) {
+    const s = { opened: true, status, last: M.codesRequest(true, "x"), wanted: M.codesRequest(true, "") }
+    assert.equal(M.loadDecision(Object.assign({ trigger: "change" }, s)), "none", status)
+    assert.equal(M.loadDecision(Object.assign({ trigger: "refresh" }, s)), "none", status)
+  }
+})
+
+test("loadDecision refreshes at a period boundary even with an unchanged request", () => {
+  const r = M.codesRequest(true, "a")
+  assert.equal(M.loadDecision({ trigger: "refresh", opened: true, status: "READY", last: r, wanted: r }), "now")
+  assert.equal(M.loadDecision({ trigger: "refresh", opened: false, status: "READY", last: r, wanted: r }), "none")
+})
+
+test("a failed reveal keeps labels, so the selection and request stay put", () => {
+  const entries = [full("a"), full("b")]
+  const kept = M.hideCodes(entries, "")
+  const list = M.filterAndOrder(kept, "", M.emptyPrefs())
+  const wanted = M.codesRequest(true, list[M.selectionIndex(list, "b")].id)
+  assert.equal(M.loadDecision({ trigger: "change", opened: true, status: "READY", last: M.codesRequest(true, "b"), wanted }), "none")
+})
+
+test("keepsLabels after keyring or reveal failures only", () => {
+  assert.equal(M.keepsLabels("KEYRING_LOCKED", M.codesRequest(false, "")), true)
+  assert.equal(M.keepsLabels("DECRYPT_FAILED", M.codesRequest(true, "a")), true)
+  assert.equal(M.keepsLabels("VAULT_FORMAT_CHANGED", M.codesRequest(true, "")), false)
+  assert.equal(M.keepsLabels("HELPER_MISSING", M.codesRequest(false, "")), false)
 })

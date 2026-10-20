@@ -171,8 +171,8 @@ docs/                    # specs, plan
 
 - While the panel is open the service polls `check` every 5 s (every 60 s while closed). A changed `vaultMtime` triggers a reload, so new accounts appear automatically whenever the official app has synced.
 - While the panel is open `codes` is requested **once per period boundary**, not every second. Countdown rings tick locally.
-- The footer shows "Updated N ago" (the vault's last local change, worded honestly).
-- If the vault has not changed for longer than a threshold (setting, default 24 h), a subtle "Not synced for …" hint with a Sync button appears.
+- The panel header shows "Updated N ago" (the vault's last local change, worded honestly).
+- The footer always has a Sync button. If the vault has not changed for longer than a threshold (setting, default 24 h), a subtle "Not synced for …" hint appears next to it.
 - **Sync** starts `/usr/bin/proton-authenticator`. The plugin picks up the change once the app has written the vault. Whether the app can start in the tray without a window is checked during implementation.
 - The official app is **not** started automatically when the panel opens: it is slow and takes focus.
 - On `VAULT_FORMAT_CHANGED` the panel shows a clear message and an "Open Proton" button, never partial data.

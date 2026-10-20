@@ -48,6 +48,8 @@ Item {
   property bool promptRunning: false
   property bool checkRunning: false
   property bool codesRunning: false
+  // Unlock pressed while another codes call was running; it runs next.
+  property bool unlockQueued: false
   property var queuedRequest: null
   // Bumped whenever codes are cleared, so a reply that was already in flight
   // cannot bring them back after the panel closed.
@@ -105,6 +107,7 @@ Item {
     helper.call(root.withDemo(["check"]), "", function(reply) {
       root.checkRunning = false
       var before = root.vaultMtime
+      var wasReady = root.checkStatus === "READY"
       if (reply.ok) {
         root.checkStatus = typeof reply.status === "string" ? reply.status : "INTERNAL"
         root.vaultMtime = typeof reply.vaultMtime === "number" ? reply.vaultMtime : 0
@@ -113,11 +116,13 @@ Item {
       }
       var codesFailed = root.codesError !== ""
       // A locked keyring or a broken vault must not leave old codes on screen.
-      if (root.checkStatus !== "READY") root.clearCodes()
+      // A locked keyring says nothing about the vault, so its labels stay.
+      if (root.checkStatus === "KEYRING_LOCKED") root.dropCodes()
+      else if (root.checkStatus !== "READY") root.clearCodes()
       else root.applyStatus()
       if (reply.ok) root.retryPrefs()
       if (root.checkStatus === "READY" && root.panelOpen
-          && (codesFailed || root.vaultMtime !== before))
+          && (codesFailed || !wasReady || root.vaultMtime !== before))
         root.loadCodes(root.lastRequest)
     })
   }
@@ -128,18 +133,23 @@ Item {
   function loadCodes(request) {
     var req = Model.codesRequest(request ? request.privateMode : true, request ? request.revealId : "")
     root.lastRequest = req
-    if (req.privateMode) {
-      var exposed = root.entries.some(function(e) {
-        return e && e.id !== req.revealId && (e.code !== null || e.nextCode !== null)
-      })
-      if (exposed) root.entries = Model.hideCodes(root.entries, req.revealId)
-    }
+    if (req.privateMode) root.hideExcept(req.revealId)
     if (root.promptRunning || !root.panelOpen) return
     if (root.codesRunning) {
       root.queuedRequest = req
       return
     }
     runCodes(req, false)
+  }
+
+  // Drops every code but revealId's without running the helper, so a
+  // privacy-mode selection change never leaves the previous code loaded.
+  function hideExcept(revealId) {
+    var id = Model.validId(revealId) ? revealId : ""
+    var exposed = root.entries.some(function(e) {
+      return e && e.id !== id && (e.code !== null || e.nextCode !== null)
+    })
+    if (exposed) root.entries = Model.hideCodes(root.entries, id)
   }
 
   function runCodes(req, allowPrompt) {
@@ -167,13 +177,19 @@ Item {
           if (Model.sameRequest(wanted, req) && root.queuedRequest === null)
             root.queuedRequest = Model.codesRequest(true, "")
         } else {
-          root.entries = []
+          // Labels stay after a keyring or reveal failure, so the list does
+          // not empty and move the selection, which would start another reveal.
+          root.entries = Model.keepsLabels(reply.error, req) ? Model.hideCodes(root.entries, "") : []
           root.codesError = reply.error
         }
         root.applyStatus()
       }
       if (allowPrompt) root.refreshStatus()
-      if (root.queuedRequest !== null) {
+      if (root.unlockQueued) {
+        root.unlockQueued = false
+        root.queuedRequest = null
+        if (root.panelOpen && !root.promptRunning) root.runCodes(root.lastRequest, true)
+      } else if (root.queuedRequest !== null) {
         var next = root.queuedRequest
         root.queuedRequest = null
         if (root.panelOpen) root.loadCodes(next)
@@ -186,15 +202,29 @@ Item {
   function clearCodes() {
     root.codesGeneration++
     root.queuedRequest = null
+    root.unlockQueued = false
     root.entries = []
     root.now = 0
     root.codesError = ""
     root.applyStatus()
   }
 
-  // Shows the keyring's unlock prompt; the only call allowed to.
+  function dropCodes() {
+    root.codesGeneration++
+    root.queuedRequest = null
+    root.entries = Model.hideCodes(root.entries, "")
+    root.codesError = ""
+    root.applyStatus()
+  }
+
+  // Shows the keyring's unlock prompt; the only call allowed to. Pressed
+  // while a codes call runs, it waits for that call instead of being lost.
   function unlock() {
-    if (root.promptRunning || root.codesRunning) return
+    if (root.promptRunning) return
+    if (root.codesRunning) {
+      root.unlockQueued = true
+      return
+    }
     runCodes(root.lastRequest, true)
   }
 

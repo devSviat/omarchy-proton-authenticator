@@ -312,8 +312,8 @@ function hideCodes(entries, revealId) {
     .map(function(e) { return e.id === revealId && revealId !== "" ? e : hiddenEntry(e) })
 }
 
-// A private-mode row whose code was not revealed. Unsupported entries carry a
-// kind, so they never count as hidden.
+// A private-mode row whose code was not revealed. Its kind is unknown until
+// then, so it may still turn out to be unsupported.
 function isHidden(entry) {
   return !!entry && (entry.kind === null || entry.kind === undefined)
 }
@@ -372,8 +372,9 @@ function maskedCode() {
   return "\u2022\u2022\u2022 \u2022\u2022\u2022"
 }
 
+// Hidden rows are revealed first: copying blind could pick an unsupported one.
 function canCopy(entry) {
-  return !!entry && validId(entry.id) && entry.kind !== "unsupported"
+  return !!entry && validId(entry.id) && !isHidden(entry) && entry.kind !== "unsupported"
 }
 
 function shellQuote(text) {
@@ -387,7 +388,7 @@ function state(title, detail, action, actionLabel) {
 var OPEN_PROTON = "Open Proton"
 
 // What the panel shows instead of the list; null when the list has rows.
-// s: { status, entryCount, matchCount, query, codesRunning, promptRunning, pluginDir }
+// s: { status, entryCount, matchCount, codesRunning, promptRunning, pluginDir }
 function emptyState(s) {
   if (s.promptRunning) return state("Waiting for keyring\u2026", "Unlock it in the prompt")
   switch (s.status) {
@@ -465,4 +466,27 @@ function heroMeta(h) {
 function heroBadge(privacy, demo) {
   if (privacy) return "PRIVATE"
   return demo ? "DEMO" : ""
+}
+
+// Whether the panel should ask the service for codes. trigger is "change"
+// (privacy, selection or status moved) or "refresh" (a period boundary).
+// Nothing is loaded while the status is an error: a failed reveal would
+// otherwise be retried at once, forever. Retries come from the service's
+// check polling, Unlock or Retry.
+// s: { trigger, opened, status, last, wanted }
+function loadDecision(s) {
+  if (!s.opened || s.status !== "READY") return "none"
+  if (s.trigger === "refresh") return "now"
+  if (sameRequest(s.wanted, s.last)) return "none"
+  if (!s.last || s.last.privateMode !== s.wanted.privateMode) return "now"
+  return "debounce"
+}
+
+var KEYRING_ERRORS = ["KEYRING_LOCKED", "KEYRING_UNAVAILABLE", "KEY_NOT_FOUND"]
+
+// A keyring failure, or any failure of a single-entry reveal, says nothing
+// about the labels already listed; any other failure may mean the vault itself
+// changed, so nothing stale is kept.
+function keepsLabels(error, request) {
+  return KEYRING_ERRORS.indexOf(error) >= 0 || (!!request && request.revealId !== "")
 }

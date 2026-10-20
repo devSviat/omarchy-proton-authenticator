@@ -28,6 +28,7 @@ CursorSurface {
   readonly property color codeColor: root.urgent ? root.urgentColor : root.foreground
 
   signal clicked()
+  signal pointerMoved(var row, var mouse)
 
   hasCursor: root.selected
   implicitHeight: Math.max(badge.height, labels.implicitHeight, codeColumn.implicitHeight)
@@ -148,8 +149,11 @@ CursorSurface {
   }
 
   MouseArea {
+    id: rowMouse
     anchors.fill: parent
+    hoverEnabled: true
     cursorShape: Qt.PointingHandCursor
+    onPositionChanged: function(mouse) { root.pointerMoved(rowMouse, mouse) }
     onClicked: root.clicked()
   }
 }
