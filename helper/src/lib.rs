@@ -8,6 +8,7 @@ pub mod crypto;
 pub mod demo;
 pub mod domain;
 pub mod error;
+pub mod holder;
 pub mod keyring;
 pub mod otp;
 pub mod output;

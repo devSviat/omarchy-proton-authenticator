@@ -1,5 +1,6 @@
 //! Command-line protocol: parses the arguments, runs one command and writes
-//! exactly one JSON line to stdout.
+//! exactly one JSON line to stdout. The internal `hold` command, started only
+//! by `copy`, answers with one status byte instead.
 
 use std::ffi::OsString;
 use std::io::{self, Read, Write};
@@ -15,11 +16,11 @@ use crate::clipboard::{Clipboard, WL_COPY};
 use crate::demo;
 use crate::domain::{EntryView, PrivateEntry};
 use crate::error::{ErrorCode, Result};
+use crate::holder::{self, Holder};
 use crate::keyring::{SecretToolKeys, SECRET_TOOL};
 use crate::output::{render, render_err, Rendered};
 use crate::prefs::{self, Prefs};
 use crate::proc;
-use crate::sys;
 use crate::vault::ProtonIdbVault;
 use crate::watchdog::Watchdog;
 
@@ -102,6 +103,10 @@ pub enum Command {
     },
     PrefsGet,
     PrefsSet,
+    /// Internal: the detached half of `copy`, see [`holder::hold`].
+    Hold {
+        clear_after: Duration,
+    },
 }
 
 #[derive(Serialize)]
@@ -211,6 +216,9 @@ pub fn parse(args: &[OsString]) -> Result<Command> {
         ("copy", rest) => parse_copy(rest),
         ("prefs", ["get"]) => Ok(Command::PrefsGet),
         ("prefs", ["set"]) => Ok(Command::PrefsSet),
+        ("hold", ["--clear-after", secs]) => Ok(Command::Hold {
+            clear_after: clear_after(Some(secs))?,
+        }),
         _ => Err(ErrorCode::InvalidArgument),
     }
 }
@@ -347,45 +355,37 @@ fn finish(watchdog: Watchdog, reply: Rendered) -> ExitCode {
     exit_code(reply.ok)
 }
 
-/// Puts the code on the clipboard before replying, so a missing or failing
-/// wl-copy is still reported. Then holds it from a detached session with
-/// stdout closed, so the caller sees EOF and is free to exit while the code
-/// is still on the clipboard.
+/// Replies only once a detached holder has the code on the clipboard, so a
+/// missing or failing wl-copy is still reported, and the holder clears it at
+/// the deadline whatever happens to this process afterwards.
 fn copy(
     id: String,
     clear_after: Duration,
     demo: bool,
-    clipboard: &dyn Clipboard,
-    watchdog: Watchdog,
+    holder: &Holder,
     timeouts: &Timeouts,
-) -> ExitCode {
-    let started = codes(Some(id), false, demo, timeouts)
-        .and_then(|body| {
-            body.entries
-                .into_iter()
-                .next()
-                .ok_or(ErrorCode::ItemNotFound)
-        })
-        .and_then(app::copy_code)
-        .and_then(|code| clipboard.start(code, clear_after));
-    let hold = match started {
-        Ok(hold) => hold,
-        Err(e) => return finish(watchdog, render::<EmptyBody>(Err(e))),
-    };
-    finish(watchdog, render(Ok(EmptyBody {})));
-    if sys::close_stdout().is_err() || sys::detach_session().is_err() {
-        hold.abort();
-        return ExitCode::FAILURE;
-    }
-    exit_code(hold.wait_and_clear().is_ok())
+) -> Result<EmptyBody> {
+    let entry = codes(Some(id), false, demo, timeouts)?
+        .entries
+        .into_iter()
+        .next()
+        .ok_or(ErrorCode::ItemNotFound)?;
+    holder.hand_off(app::copy_code(entry)?, clear_after)?;
+    Ok(EmptyBody {})
 }
 
 /// Runs one helper invocation after `harden()`: parses `args` (without the
 /// program name), arms a watchdog that ends the process with `TIMEOUT` once
 /// the command's budget from `timeouts` is spent, dispatches, and writes the
-/// reply.
-pub fn run(args: &[OsString], clipboard: &dyn Clipboard, timeouts: &Timeouts) -> ExitCode {
+/// reply. `copy` starts its holder through `holder`; `hold` uses `clipboard`.
+pub fn run(
+    args: &[OsString],
+    clipboard: &dyn Clipboard,
+    holder: &Holder,
+    timeouts: &Timeouts,
+) -> ExitCode {
     let command = match parse(args) {
+        Ok(Command::Hold { clear_after }) => return holder::hold(clear_after, clipboard),
         Ok(command) => command,
         Err(e) => {
             emit(&render_err(e));
@@ -418,9 +418,10 @@ pub fn run(args: &[OsString], clipboard: &dyn Clipboard, timeouts: &Timeouts) ->
             id,
             clear_after,
             demo,
-        } => return copy(id, clear_after, demo, clipboard, watchdog, timeouts),
+        } => render(copy(id, clear_after, demo, holder, timeouts)),
         Command::PrefsGet => render(prefs::default_dir().and_then(|dir| prefs::load(&dir))),
         Command::PrefsSet => render(prefs_set()),
+        Command::Hold { .. } => render::<EmptyBody>(Err(ErrorCode::Internal)),
     };
     finish(watchdog, reply)
 }
@@ -497,6 +498,12 @@ mod tests {
         );
         assert_eq!(parse_strs(&["prefs", "get"]), Ok(Command::PrefsGet));
         assert_eq!(parse_strs(&["prefs", "set"]), Ok(Command::PrefsSet));
+        assert_eq!(
+            parse_strs(&["hold", "--clear-after", "120"]),
+            Ok(Command::Hold {
+                clear_after: Duration::from_secs(120)
+            })
+        );
     }
 
     #[test]
@@ -588,6 +595,13 @@ mod tests {
             &["copy", "x", "--clear-after", "-5"],
             &["copy", "x", "--demo", "--demo"],
             &["check", "--demo", "--demo"],
+            &["hold"],
+            &["hold", "--clear-after"],
+            &["hold", "--clear-after", "4"],
+            &["hold", "--clear-after", "121"],
+            &["hold", "--clear-after", "20", "--demo"],
+            &["hold", "--demo", "--clear-after", "20"],
+            &["hold", "x", "--clear-after", "20"],
         ] {
             assert_eq!(
                 parse_strs(args),

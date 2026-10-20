@@ -50,6 +50,9 @@ pub trait Hold {
 ///
 /// A copy made by another client within milliseconds of the deadline can race
 /// the ownership check and be cleared.
+///
+/// The child gets SIGTERM if the thread that called [`Clipboard::start`]
+/// ends, so killing the holding process takes the code off the clipboard too.
 pub struct WlCopy {
     program: PathBuf,
 }
@@ -126,13 +129,14 @@ impl Clipboard for WlCopy {
         let deadline = Instant::now()
             .checked_add(clear_after)
             .ok_or(ErrorCode::Internal)?;
-        let mut child = spawn_tracked(
-            scrubbed_command(&self.program)
-                .args(["--foreground", "--sensitive", "--type", "text/plain"])
-                .stdin(Stdio::piped())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null()),
-        )?;
+        let mut command = scrubbed_command(&self.program);
+        command
+            .args(["--foreground", "--sensitive", "--type", "text/plain"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        sys::term_when_parent_dies(&mut command);
+        let mut child = spawn_tracked(&mut command)?;
         let pgid = match child_pgid(&child) {
             Ok(pgid) => pgid,
             Err(e) => {

@@ -5,9 +5,8 @@ import "Model.js" as Model
 // Runs pa-helper and hands each call exactly one parsed reply.
 //
 // Replies carry account labels and codes, so nothing here ever logs them.
-// The reply line (or EOF) completes a call, never process exit: `copy`
-// detaches after replying and keeps holding the clipboard, and must not be
-// killed or waited for.
+// The reply line (or EOF) completes a call, never process exit. `copy`
+// exits right after replying; a detached holder keeps the clipboard.
 Item {
   id: root
 

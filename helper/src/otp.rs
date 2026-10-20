@@ -9,9 +9,9 @@ pub enum Algorithm {
     Sha512,
 }
 
-const STEAM_ALPHABET: &[u8; 26] = b"23456789BCDFGHJKMNPQRTVWXY";
+pub const STEAM_ALPHABET: &[u8; 26] = b"23456789BCDFGHJKMNPQRTVWXY";
 const STEAM_PERIOD: u64 = 30;
-const STEAM_LENGTH: usize = 5;
+pub const STEAM_LENGTH: usize = 5;
 
 fn mac<M: Mac + KeyInit>(key: &[u8], counter: u64) -> Vec<u8> {
     let mut mac = <M as KeyInit>::new_from_slice(key).expect("HMAC accepts any key length");

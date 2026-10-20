@@ -25,7 +25,7 @@ type Captured = Result<Zeroizing<Vec<u8>>>;
 /// Reader and writer threads only shuttle bytes through heap buffers, so a
 /// small stack is enough; under `mlockall` every stack counts against the
 /// locked-memory budget.
-const IO_THREAD_STACK: usize = 64 * 1024;
+pub(crate) const IO_THREAD_STACK: usize = 64 * 1024;
 
 /// A command for `program` with a cleared environment plus the allow-listed
 /// variables, running in its own process group so it can be killed as a whole.
@@ -89,6 +89,13 @@ pub(crate) fn reap(child: &mut Child) -> Result<ExitStatus> {
     let mut groups = active_groups();
     untrack(&mut groups, child);
     child.wait().map_err(|_| ErrorCode::Internal)
+}
+
+/// Forgets a child started by [`spawn_tracked`] without reaping or killing
+/// it, so it outlives this process and a later watchdog expiry spares it.
+pub(crate) fn release(child: Child) {
+    let mut groups = active_groups();
+    untrack(&mut groups, &child);
 }
 
 /// Kills the child's whole process group, then reaps the child. The child is
@@ -244,7 +251,7 @@ fn wait_for_both(
     }
 }
 
-fn read_capped(mut source: impl Read, max_out: usize) -> Captured {
+pub(crate) fn read_capped(mut source: impl Read, max_out: usize) -> Captured {
     let limit = max_out + 1;
     let mut buf = Zeroizing::new(Vec::with_capacity(limit));
     buf.resize(limit, 0);

@@ -150,6 +150,12 @@ fn unknown_command_is_invalid_argument() {
         &["copy"],
         &["copy", "demo-github", "--demo", "extra"],
         &["--demo"],
+        &["hold"],
+        &["hold", "--clear-after"],
+        &["hold", "--clear-after", "4"],
+        &["hold", "--clear-after", "121"],
+        &["hold", "--clear-after", "20", "--demo"],
+        &["hold", "demo-github", "--clear-after", "20"],
     ];
     for args in cases {
         let out = sandbox.run(args);
@@ -541,6 +547,41 @@ fn watchdog_times_out_stalled_run() {
         (Duration::from_secs(10)..Duration::from_secs(13)).contains(&elapsed),
         "{elapsed:?}"
     );
+}
+
+fn proc_owner(pid: u32) -> Option<u32> {
+    use std::os::unix::fs::MetadataExt;
+    fs::metadata(format!("/proc/{pid}/environ"))
+        .ok()
+        .map(|m| m.uid())
+}
+
+/// Never reaches wl-copy: the input it is finally given is not a code.
+#[test]
+fn hold_is_hardened_and_rejects_non_codes() {
+    if !memlock_fits() {
+        return;
+    }
+    let sandbox = Sandbox::new();
+    let mut child = sandbox
+        .command(&["hold", "--clear-after", "5"])
+        .stdin(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let our_uid = proc_owner(std::process::id()).unwrap();
+    if our_uid != 0 {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while proc_owner(child.id()) != Some(0) {
+            assert!(Instant::now() < deadline, "holder stayed dumpable");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+    stdin.write_all(b"not-a-code").unwrap();
+    drop(stdin);
+    let out = child.wait_with_output().unwrap();
+    assert_eq!(out.stdout, b"E");
+    assert_eq!(out.status.code(), Some(1));
 }
 
 const ENTRY_FIELDS: [&str; 9] = [

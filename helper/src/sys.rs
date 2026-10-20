@@ -3,6 +3,8 @@
 use std::fs::OpenOptions;
 use std::io;
 use std::os::fd::AsRawFd;
+use std::os::unix::process::CommandExt;
+use std::process::Command;
 
 use crate::error::{ErrorCode, Result};
 
@@ -108,6 +110,37 @@ pub fn close_stdout() -> Result<()> {
         return Err(ErrorCode::Internal);
     }
     Ok(())
+}
+
+/// Makes the child that `command` spawns receive SIGTERM once the spawning
+/// thread ends, so a killed holder never leaves its clipboard owner behind.
+///
+/// The signal follows the thread, not the process: spawn from a thread that
+/// lives as long as the child is needed.
+pub fn term_when_parent_dies(command: &mut Command) {
+    let parent = std::process::id() as libc::pid_t;
+    // SAFETY: the closure runs in the child between fork and exec and makes
+    // only async-signal-safe calls (prctl, getppid) without allocating; an
+    // OS error is stored inline in io::Error.
+    unsafe {
+        command.pre_exec(move || {
+            if libc::prctl(
+                libc::PR_SET_PDEATHSIG,
+                libc::SIGTERM as libc::c_ulong,
+                0 as libc::c_ulong,
+                0 as libc::c_ulong,
+                0 as libc::c_ulong,
+            ) != 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+            // The parent may have died before prctl took effect.
+            if libc::getppid() != parent {
+                return Err(io::Error::from_raw_os_error(libc::ESRCH));
+            }
+            Ok(())
+        });
+    }
 }
 
 /// Sends `signal` to every process in group `pgid`. A group that no longer
