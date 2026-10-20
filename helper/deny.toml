@@ -1,5 +1,8 @@
 [graph]
 all-features = true
+# The helper is Linux-only (/proc, prctl, mlockall), so other targets' crates
+# would only widen the allow-list below.
+targets = ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"]
 
 [advisories]
 version = 2
@@ -13,6 +16,67 @@ confidence-threshold = 0.9
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
+# Every crate in the graph was reviewed; any other one fails the check until
+# it is reviewed and added here.
+allow = [
+    # The shipped helper.
+    "aead",
+    "aes",
+    "aes-gcm",
+    "block-buffer",
+    "cfg-if",
+    "cipher",
+    "cmov",
+    "const-oid",
+    "cpubits",
+    "cpufeatures",
+    "crypto-common",
+    "ctr",
+    "ctutils",
+    "digest",
+    "ghash",
+    "hkdf",
+    "hmac",
+    "hybrid-array",
+    "inout",
+    "itoa",
+    "libc",
+    "memchr",
+    "pa-helper",
+    "polyval",
+    "proc-macro2",
+    "quote",
+    "serde",
+    "serde_core",
+    "serde_derive",
+    "serde_json",
+    "sha1",
+    "sha2",
+    "syn",
+    "typenum",
+    "unicode-ident",
+    "universal-hash",
+    "zeroize",
+    "zmij",
+    # Tests only: rusqlite as the reference reader, tempfile for fixtures.
+    "bitflags",
+    "fallible-iterator",
+    "fallible-streaming-iterator",
+    "fastrand",
+    "foldhash",
+    "getrandom",
+    "hashbrown",
+    "hashlink",
+    "libsqlite3-sys",
+    "linux-raw-sys",
+    "once_cell",
+    "pkg-config",
+    "rusqlite",
+    "rustix",
+    "smallvec",
+    "tempfile",
+    "vcpkg",
+]
 
 [sources]
 unknown-registry = "deny"

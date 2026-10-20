@@ -15,9 +15,12 @@ jobs:
       run:
         working-directory: helper
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master, 2026-10-16
+        with:
+          toolchain: 1.99.1
           components: clippy, rustfmt
       - run: cargo fmt --check
       - run: cargo clippy --all-targets --locked -- -D warnings
@@ -25,8 +28,50 @@ jobs:
       - run: cargo test --locked
       - run: cargo test --locked --features budget-probe
       - run: cargo test --locked --release --features budget-probe --test budget
-      - uses: EmbarkStudios/cargo-deny-action@v2
+      - name: No SQLite in the shipped helper
+        run: |
+          if cargo tree --locked -e normal | grep -i sqlite; then
+            echo "SQLite is a normal dependency of the helper" >&2
+            exit 1
+          fi
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
         with:
           command: check
           manifest-path: helper/Cargo.toml
           arguments: --locked
+
+  msrv:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: helper
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master, 2026-10-16
+        with:
+          toolchain: 1.89.0
+      - run: cargo build --locked --release
+      - run: cargo test --locked --no-run --features budget-probe
+
+  plugin:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - run: node --test tests/
+      - name: Helper version matches the manifest
+        run: |
+          node -e '
+            const fs = require("fs")
+            const manifest = JSON.parse(fs.readFileSync("manifest.json", "utf8")).version
+            const cargo = fs.readFileSync("helper/Cargo.toml", "utf8")
+              .match(/^\[package\][^[]*?^version = "([^"]+)"/m)[1]
+            if (manifest !== cargo) {
+              console.error(`manifest.json ${manifest} != helper/Cargo.toml ${cargo}`)
+              process.exit(1)
+            }
+          '
+      - run: bash -n install.sh
