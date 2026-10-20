@@ -174,7 +174,7 @@ docs/                    # specs, plan
 - While the panel is open `codes` is requested **once per period boundary**, not every second. Countdown rings tick locally.
 - The panel header shows "Updated N ago" (the vault's last local change, worded honestly).
 - The footer always has a Sync button. If the vault has not changed for longer than a threshold (setting, default 24 h), a subtle "Not synced for …" hint appears next to it.
-- **Sync** starts `/usr/bin/proton-authenticator`. The plugin picks up the change once the app has written the vault. Whether the app can start in the tray without a window is checked during implementation.
+- **Sync** starts `/usr/bin/proton-authenticator`. The plugin picks up the change once the app has written the vault. The app (1.1.6) has no tray, background or start-hidden mode, so Sync opens its normal window (see `docs/notes/proton-tray.md`).
 - The official app is **not** started automatically when the panel opens: it is slow and takes focus.
 - On `VAULT_FORMAT_CHANGED` the panel shows a clear message and an "Open Proton" button, never partial data.
 
@@ -183,7 +183,8 @@ docs/                    # specs, plan
 Layout **A, a list under the bar**, was chosen.
 
 - **Opening:** a click on the bar icon or `Super+Alt+A` (`omarchy-shell shell toggle sviat.proton-authenticator`). Focus goes straight to the search field.
-- **Row:** issuer initial, issuer, account (elided), the code in a large monospace font (grouped, e.g. `482 913`) and a countdown ring. The code and ring turn red in the last 5 s.
+- **Row:** issuer icon, issuer, account (elided), the code in a large monospace font (grouped, e.g. `482 913`) and a countdown ring. The code and ring turn red in the last 5 s.
+- **Issuer icons:** monochrome brand glyphs from the Nerd Font the bar already uses, looked up by a normalized issuer name; the issuer's initial when no glyph matches. No icon files and no network.
 - **Next code:** shown only on the selected row, only in the last 5 s.
 - **Search:** fuzzy over issuer and account (`gh` → GitHub). Order: pinned, then recently used, then alphabetical.
 - **Keys** (every action on Ctrl, so typing never triggers one):
@@ -254,5 +255,3 @@ Pinned and recently used accounts are stored as **ids only** (no labels) in `$XD
 ## Left to the implementation
 
 - How to watch for vault changes beyond `check` polling, if polling proves insufficient.
-- Issuer icons: initials by default; local icons only if Proton's data provides them, never fetched from the network.
-- Whether Proton can start in the tray (see "Sync").

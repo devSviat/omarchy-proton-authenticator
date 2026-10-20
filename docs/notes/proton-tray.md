@@ -6,7 +6,10 @@ Result: no. The app has no tray icon, no background mode and no start-hidden CLI
 
 ## Evidence
 
-Source: ProtonMail/WebClients, `applications/authenticator/src-tauri` (default branch at the time of the check).
+Source: ProtonMail/WebClients, `applications/authenticator/src-tauri`. The repository has no release tags for the app, so the source is pinned to commits:
+
+- `faeaf695f27ea656d05fe1440874ca781d7aba41` ("Bump Authenticator to 1.1.6", 2026-06-09): the 1.1.6 version bump. The points below were checked at this commit.
+- `8b1b4e2bbad22896917b32af01b465274579d2e9` (`main`, 2026-10-20): re-checked; `lib.rs` still has no tray code and `Cargo.toml` still reports 1.1.6.
 
 - `src-tauri/src/lib.rs`
   - The `main` window is created unconditionally in `setup` with `WebviewWindowBuilder` (800x600, no `visible(false)`).
