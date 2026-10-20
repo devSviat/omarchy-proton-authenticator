@@ -556,6 +556,13 @@ function revealIdFor(privacy, entry, chosen) {
   return entry.id
 }
 
+// Enter chooses the selected row only while rows are listed. On an empty
+// state (Unlock, Retry, No matches) it chooses nothing, so the first row of
+// labels loaded afterwards is not revealed.
+function enterChoosesRow(emptyState) {
+  return emptyState === null || emptyState === undefined
+}
+
 // Brand glyphs from the Nerd Font the bar already uses, so issuer icons need
 // no files and no network. Every codepoint was checked against the installed
 // JetBrainsMono Nerd Font; keys are issuers as normalized by issuerKeys().

@@ -371,3 +371,17 @@ test("serviceStatus puts a helper problem first", () => {
   assert.equal(M.serviceStatus("", "", "LOADING"), "LOADING")
   assert.equal(M.serviceStatus("", "", "READY"), "LOADING")
 })
+
+test("Enter on an empty-state action chooses no row", () => {
+  const base = { entryCount: 0, matchCount: 0, codesRunning: false, promptRunning: false, pluginDir: "/p", home: "/h" }
+  const locked = M.emptyState(Object.assign({ status: "KEYRING_LOCKED" }, base))
+  const noMatches = M.emptyState(Object.assign({ status: "READY", entryCount: 2 }, base, { entryCount: 2 }))
+  assert.equal(M.enterChoosesRow(locked), false)
+  assert.equal(M.enterChoosesRow(M.emptyState(Object.assign({ status: "TIMEOUT" }, base))), false)
+  assert.equal(M.enterChoosesRow(noMatches), false)
+  assert.equal(M.enterChoosesRow(null), true)
+  // Labels arrive after Unlock: the default first row stays hidden.
+  const rows = [hidden("a"), hidden("b")]
+  const chosen = M.enterChoosesRow(locked)
+  assert.equal(M.revealIdFor(true, rows[M.selectionIndex(rows, "")], chosen), "")
+})

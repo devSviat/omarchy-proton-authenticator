@@ -276,9 +276,12 @@ Panel {
   onSearchShownChanged: if (!root.searchShown) root.clearSearch()
 
   function activate() {
-    root.selectionChosen = true
-    if (root.emptyState !== null && root.emptyState.action !== "") root.runAction(root.emptyState.action)
-    else root.useEntry(root.selectedEntry)
+    if (root.emptyState !== null && root.emptyState.action !== "") {
+      root.runAction(root.emptyState.action)
+      return
+    }
+    if (Model.enterChoosesRow(root.emptyState)) root.selectionChosen = true
+    root.useEntry(root.selectedEntry)
   }
 
   function clickEntry(id) {

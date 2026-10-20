@@ -61,7 +61,11 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
-      - run: node --test tests/
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: 24
+      # Node 22+ treats a bare directory argument as a module path.
+      - run: node --test tests/*.test.mjs
       - name: Helper version matches the manifest
         run: |
           node -e '

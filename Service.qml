@@ -29,6 +29,13 @@ Item {
   // "" until `pa-helper version` has answered for the current manifest.
   property string versionStatus: ""
   property bool versionRunning: false
+  // The manifest version the helper is checked against. The shell assigns a
+  // fresh manifest copy on every plugin-list change, so only a different
+  // version resets the check. null until the first manifest arrives.
+  property var manifestVersion: null
+  // Codes were cleared while the helper was unverified; the next READY check
+  // reloads them for an open panel.
+  property bool reloadPending: false
 
   // Codes live here only while a panel is open.
   property var entries: []
@@ -98,18 +105,22 @@ Item {
   // The manifest arrives after creation, and again after a rescan such as
   // `omarchy plugin update`.
   onManifestChanged: {
+    var version = root.manifest ? String(root.manifest.version || "") : ""
+    if (version === root.manifestVersion) return
+    root.manifestVersion = version
     root.versionStatus = ""
     root.clearCodes()
+    root.reloadPending = true
     root.checkVersion()
   }
 
   function checkVersion() {
-    if (root.versionRunning || root.promptRunning || !root.manifest) return
-    var expected = String(root.manifest.version || "")
+    if (root.versionRunning || root.promptRunning || root.manifestVersion === null) return
+    var expected = root.manifestVersion
     root.versionRunning = true
     helper.call(["version"], "", function(reply) {
       root.versionRunning = false
-      if (!root.manifest || String(root.manifest.version || "") !== expected) {
+      if (root.manifestVersion !== expected) {
         root.checkVersion()
         return
       }
@@ -119,6 +130,7 @@ Item {
         root.refreshStatus()
       } else {
         root.clearCodes()
+        root.reloadPending = true
       }
     })
   }
@@ -154,9 +166,13 @@ Item {
         root.checkStatus = reply.error
         // The binary went away or changed under us: verify it again before
         // trusting another READY.
-        if (reply.error === "HELPER_MISSING" || reply.error === "HELPER_OUTDATED") root.versionStatus = ""
+        if (reply.error === "HELPER_MISSING" || reply.error === "HELPER_OUTDATED") {
+          root.versionStatus = ""
+          root.reloadPending = true
+        }
       }
-      var codesFailed = root.codesError !== ""
+      var codesFailed = root.codesError !== "" || root.reloadPending
+      if (root.checkStatus === "READY") root.reloadPending = false
       // A locked keyring or a broken vault must not leave old codes on screen.
       // A locked keyring says nothing about the vault, so its labels stay.
       if (root.checkStatus === "KEYRING_LOCKED") root.dropCodes()
