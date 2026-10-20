@@ -1,0 +1,34 @@
+name: Bug report
+description: Something does not work as described in the README
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Never paste real 2FA codes, seeds, vault files, keyring output or account names here.**
+        Security problems go through a private report instead (see SECURITY.md).
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what the panel showed instead.
+    validations:
+      required: true
+  - type: input
+    id: status
+    attributes:
+      label: Status code
+      description: Output of `omarchy-shell sviat.proton-authenticator status` (e.g. READY, KEYRING_LOCKED).
+  - type: input
+    id: versions
+    attributes:
+      label: Versions
+      description: Plugin version (manifest.json), `bin/pa-helper version`, Omarchy version, Proton Authenticator version.
+    validations:
+      required: true
+  - type: checkboxes
+    id: demo
+    attributes:
+      label: Reproduction
+      options:
+        - label: It also happens in demo mode
