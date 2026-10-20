@@ -7,6 +7,7 @@ use std::time::Duration;
 use pa_helper::error::ErrorCode;
 use pa_helper::ssv::{decode, get, Value};
 use pa_helper::vault::{read_stable, ProtonIdbVault, VaultSource};
+use pa_helper::wal::{apply_wal, Applied};
 use support::fixture::{self, db_path, shm_path, wal_path};
 use support::wal_writer;
 use tempfile::TempDir;
@@ -205,6 +206,19 @@ fn h_big_endian_checksum_wal() {
 }
 
 #[test]
+fn i_wal_larger_than_image_is_streamed() {
+    let tmp = TempDir::new().unwrap();
+    fixture::write_vault_wal_closed(tmp.path(), &key_ref(), &items(0..600));
+    let wal_len = fs::metadata(wal_path(tmp.path())).unwrap().len();
+    assert!(
+        (4 * 1024 * 1024..16 * 1024 * 1024).contains(&wal_len),
+        "{wal_len}"
+    );
+    assert_matches_sqlite_and_untouched(tmp.path());
+    assert_eq!(our_item_ids(tmp.path()).len(), 600);
+}
+
+#[test]
 fn rebuilt_little_endian_wal_roundtrips() {
     let tmp = TempDir::new().unwrap();
     fixture::write_vault_wal_closed(tmp.path(), &key_ref(), &items(0..5));
@@ -241,7 +255,10 @@ fn oversized_main_is_format_changed() {
 fn oversized_wal_is_format_changed() {
     let tmp = TempDir::new().unwrap();
     fixture::write_vault(tmp.path(), &key_ref(), &[]);
-    fs::write(wal_path(tmp.path()), vec![0u8; 5 * 1024 * 1024]).unwrap();
+    fs::File::create(wal_path(tmp.path()))
+        .unwrap()
+        .set_len(16 * 1024 * 1024 + 1)
+        .unwrap();
     assert_eq!(
         ProtonIdbVault::new(tmp.path().to_path_buf())
             .load()
@@ -377,7 +394,7 @@ fn wal_appearing_during_read_is_unstable_then_picked_up() {
     fixture::write_vault(tmp.path(), &key_ref(), &[]);
     let wal = wal_path(tmp.path());
     let mut calls = 0;
-    let files = read_stable(&db_path(tmp.path()), &mut || {
+    let image = read_stable(&db_path(tmp.path()), &mut || {
         calls += 1;
         if calls == 1 {
             fs::write(&wal, b"x").unwrap();
@@ -386,5 +403,55 @@ fn wal_appearing_during_read_is_unstable_then_picked_up() {
     .unwrap()
     .unwrap();
     assert_eq!(calls, 2);
-    assert_eq!(files.wal.unwrap().as_slice(), b"x");
+    assert_eq!(image.as_slice(), fs::read(db_path(tmp.path())).unwrap());
+}
+
+/// Serves `first` until the second rewind, then `second`.
+struct ChangingWal {
+    first: Vec<u8>,
+    second: Vec<u8>,
+    rewinds: usize,
+    pos: usize,
+}
+
+impl std::io::Read for ChangingWal {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let src = if self.rewinds < 2 {
+            &self.first
+        } else {
+            &self.second
+        };
+        let n = buf.len().min(src.len().saturating_sub(self.pos));
+        buf[..n].copy_from_slice(&src[self.pos..self.pos + n]);
+        self.pos += n;
+        Ok(n)
+    }
+}
+
+impl std::io::Seek for ChangingWal {
+    fn seek(&mut self, to: std::io::SeekFrom) -> std::io::Result<u64> {
+        assert_eq!(to, std::io::SeekFrom::Start(0));
+        self.rewinds += 1;
+        self.pos = 0;
+        Ok(0)
+    }
+}
+
+#[test]
+fn wal_changing_between_passes_is_reported() {
+    let tmp = TempDir::new().unwrap();
+    fixture::write_vault_wal_closed(tmp.path(), &key_ref(), &items(0..4));
+    let main = fs::read(db_path(tmp.path())).unwrap();
+    let wal = fs::read(wal_path(tmp.path())).unwrap();
+    let mut image = Zeroizing::new(Vec::with_capacity(2 * 1024 * 1024));
+    image.extend_from_slice(&main);
+    let mut reader = ChangingWal {
+        second: wal[..32 + 24 + 4096].to_vec(),
+        first: wal,
+        rewinds: 0,
+        pos: 0,
+    };
+    let applied = apply_wal(&mut image, Some(&mut reader), 2 * 1024 * 1024).unwrap();
+    assert_eq!(applied, Applied::Changed);
+    assert_eq!(reader.rewinds, 2);
 }

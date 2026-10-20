@@ -19,9 +19,10 @@ const MAX_WALK_DEPTH: usize = 6;
 const MAX_CANDIDATES: usize = 32;
 const MAX_DIR_ENTRIES: usize = 10_000;
 const MAX_ITEMS: usize = 1000;
-const MAX_MAIN_BYTES: u64 = 2 * 1024 * 1024;
-const MAX_WAL_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_IMAGE_BYTES: usize = 2 * 1024 * 1024;
+/// WebKit leaves checkpointing to SQLite's default of 1000 pages, so a live
+/// WAL reaches about 4 MiB. It is streamed, never held whole.
+const MAX_WAL_BYTES: u64 = 16 * 1024 * 1024;
 const STABLE_RETRIES: usize = 3;
 const STABLE_PAUSE: Duration = Duration::from_millis(50);
 
@@ -58,9 +59,31 @@ impl fmt::Debug for EncryptedItem {
     }
 }
 
+/// One consistent read of the vault, kept as a single in-memory image.
+pub trait Snapshot {
+    fn key_ref(&self) -> Result<StorageKeyRef>;
+
+    /// Calls `f` with each item, decoded from the image one at a time, so the
+    /// caller decides what to keep. Fails with `OutputTooLarge` after the
+    /// first `MAX_ITEMS` items when there are more.
+    fn for_each_item(&self, f: &mut dyn FnMut(EncryptedItem) -> Result<()>) -> Result<()>;
+}
+
 pub trait VaultSource {
     fn modified(&self) -> Result<u64>;
-    fn load(&self) -> Result<(StorageKeyRef, Vec<EncryptedItem>)>;
+    fn snapshot(&self) -> Result<Box<dyn Snapshot>>;
+
+    /// Collects the whole snapshot; the codes path streams it instead.
+    fn load(&self) -> Result<(StorageKeyRef, Vec<EncryptedItem>)> {
+        let snapshot = self.snapshot()?;
+        let key_ref = snapshot.key_ref()?;
+        let mut items = Vec::new();
+        snapshot.for_each_item(&mut |item| {
+            items.push(item);
+            Ok(())
+        })?;
+        Ok((key_ref, items))
+    }
 }
 
 pub struct ProtonIdbVault {
@@ -82,12 +105,6 @@ struct Matched {
     records_root: u32,
     items_id: i64,
     key_id: i64,
-}
-
-/// Raw bytes of the database file and its `-wal`, read as one consistent view.
-pub struct RawFiles {
-    pub main: Zeroizing<Vec<u8>>,
-    pub wal: Option<Zeroizing<Vec<u8>>>,
 }
 
 impl ProtonIdbVault {
@@ -131,11 +148,19 @@ impl VaultSource for ProtonIdbVault {
             .map_or(0, |d| d.as_secs()))
     }
 
-    fn load(&self) -> Result<(StorageKeyRef, Vec<EncryptedItem>)> {
+    fn snapshot(&self) -> Result<Box<dyn Snapshot>> {
         let (_, matched) = self.select()?;
-        let key_ref = read_key_ref(&matched)?;
-        let items = read_items(&matched)?;
-        Ok((key_ref, items))
+        Ok(Box::new(matched))
+    }
+}
+
+impl Snapshot for Matched {
+    fn key_ref(&self) -> Result<StorageKeyRef> {
+        read_key_ref(self)
+    }
+
+    fn for_each_item(&self, f: &mut dyn FnMut(EncryptedItem) -> Result<()>) -> Result<()> {
+        read_items(self, f)
     }
 }
 
@@ -217,7 +242,7 @@ impl Signature {
 enum Attempt {
     Unstable,
     Skip,
-    Done(RawFiles),
+    Done(Zeroizing<Vec<u8>>),
 }
 
 fn open_nofollow(path: &Path) -> std::io::Result<File> {
@@ -236,17 +261,27 @@ fn signature_of_path(path: &Path) -> std::io::Result<Option<Signature>> {
     }
 }
 
-fn read_exact_file(file: &File, expected: Signature) -> Result<Option<Zeroizing<Vec<u8>>>> {
-    let meta = file.metadata().map_err(|_| ErrorCode::Internal)?;
-    if !meta.is_file() || Signature::of(&meta) != expected {
-        return Ok(None);
+fn fd_matches(file: &File, expected: Signature) -> bool {
+    file.metadata()
+        .is_ok_and(|m| m.is_file() && Signature::of(&m) == expected)
+}
+
+/// Reads exactly `len` bytes of `file` into `image`, which keeps its
+/// pre-allocated capacity. `Ok(false)` means the length did not match.
+fn read_main_into(mut file: &File, len: u64, image: &mut Zeroizing<Vec<u8>>) -> Result<bool> {
+    let len = usize::try_from(len).map_err(|_| ErrorCode::VaultFormatChanged)?;
+    image.resize(len, 0);
+    match file.read_exact(image) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(false),
+        Err(_) => return Err(ErrorCode::Internal),
     }
-    let len = usize::try_from(expected.len).map_err(|_| ErrorCode::VaultFormatChanged)?;
-    let mut buf = Zeroizing::new(Vec::with_capacity(len));
-    file.take(expected.len + 1)
-        .read_to_end(&mut buf)
-        .map_err(|_| ErrorCode::Internal)?;
-    Ok((buf.len() == len).then_some(buf))
+    let mut probe = [0u8; 1];
+    match file.read(&mut probe) {
+        Ok(0) => Ok(true),
+        Ok(_) => Ok(false),
+        Err(_) => Err(ErrorCode::Internal),
+    }
 }
 
 fn read_attempt(path: &Path, wal: &Path, hook: &mut dyn FnMut()) -> Result<Attempt> {
@@ -254,60 +289,68 @@ fn read_attempt(path: &Path, wal: &Path, hook: &mut dyn FnMut()) -> Result<Attem
         return Ok(Attempt::Skip);
     };
     let wal_before = signature_of_path(wal).map_err(|_| ErrorCode::VaultFormatChanged)?;
-    if main_before.len > MAX_MAIN_BYTES || wal_before.is_some_and(|s| s.len > MAX_WAL_BYTES) {
+    if main_before.len > MAX_IMAGE_BYTES as u64 || wal_before.is_some_and(|s| s.len > MAX_WAL_BYTES)
+    {
         return Err(ErrorCode::VaultFormatChanged);
     }
 
     let Ok(main_file) = open_nofollow(path) else {
         return Ok(Attempt::Unstable);
     };
-    let Some(main) = read_exact_file(&main_file, main_before)? else {
+    if !fd_matches(&main_file, main_before) {
         return Ok(Attempt::Unstable);
-    };
+    }
+    let mut image = Zeroizing::new(Vec::with_capacity(MAX_IMAGE_BYTES));
+    if !read_main_into(&main_file, main_before.len, &mut image)? {
+        return Ok(Attempt::Unstable);
+    }
+    if !wal::has_sqlite_header(&image) {
+        return Ok(Attempt::Skip);
+    }
+
     let mut wal_file = None;
-    let mut wal_bytes = None;
     if let Some(sig) = wal_before {
         let Ok(file) = open_nofollow(wal) else {
             return Ok(Attempt::Unstable);
         };
-        let Some(bytes) = read_exact_file(&file, sig)? else {
+        if !fd_matches(&file, sig) {
             return Ok(Attempt::Unstable);
-        };
+        }
         wal_file = Some(file);
-        wal_bytes = Some(bytes);
+    }
+    let mut wal_reader = wal_file.as_ref();
+    if wal::apply_wal(&mut image, wal_reader.as_mut(), MAX_IMAGE_BYTES)? == wal::Applied::Changed {
+        return Ok(Attempt::Unstable);
     }
 
     hook();
 
     let main_stable = signature_of_path(path).ok().flatten() == Some(main_before)
-        && main_file
-            .metadata()
-            .is_ok_and(|m| Signature::of(&m) == main_before);
+        && fd_matches(&main_file, main_before);
     let wal_stable = signature_of_path(wal).ok() == Some(wal_before)
         && match (&wal_file, wal_before) {
-            (Some(file), Some(sig)) => file.metadata().is_ok_and(|m| Signature::of(&m) == sig),
+            (Some(file), Some(sig)) => fd_matches(file, sig),
             _ => true,
         };
     if !(main_stable && wal_stable) {
         return Ok(Attempt::Unstable);
     }
-    Ok(Attempt::Done(RawFiles {
-        main,
-        wal: wal_bytes,
-    }))
+    Ok(Attempt::Done(image))
 }
 
-/// Reads the database and its `-wal` without SQLite touching either, retrying
-/// when either file changes during the read. `Ok(None)` means the path is not
-/// a readable regular file. `hook` runs after the reads, before the final stat.
-pub fn read_stable(path: &Path, hook: &mut dyn FnMut()) -> Result<Option<RawFiles>> {
+/// Reads the database with its `-wal` applied, without SQLite touching either,
+/// retrying when either file changes during the read. The main file goes
+/// straight into the image buffer and the WAL is streamed one frame at a time.
+/// `Ok(None)` means the path is not a regular SQLite file. `hook` runs after
+/// the reads, before the final stat.
+pub fn read_stable(path: &Path, hook: &mut dyn FnMut()) -> Result<Option<Zeroizing<Vec<u8>>>> {
     let wal = wal_path(path);
     for attempt in 0..=STABLE_RETRIES {
         if attempt > 0 {
             thread::sleep(STABLE_PAUSE);
         }
         match read_attempt(path, &wal, hook)? {
-            Attempt::Done(files) => return Ok(Some(files)),
+            Attempt::Done(image) => return Ok(Some(image)),
             Attempt::Skip => return Ok(None),
             Attempt::Unstable => {}
         }
@@ -316,18 +359,9 @@ pub fn read_stable(path: &Path, hook: &mut dyn FnMut()) -> Result<Option<RawFile
 }
 
 fn probe(path: &Path) -> Result<Probe> {
-    let Some(files) = read_stable(path, &mut || {})? else {
+    let Some(image) = read_stable(path, &mut || {})? else {
         return Ok(Probe::NoMatch);
     };
-    if !wal::has_sqlite_header(&files.main) {
-        return Ok(Probe::NoMatch);
-    }
-    let image = wal::build_image(
-        &files.main,
-        files.wal.as_ref().map(|w| w.as_slice()),
-        MAX_IMAGE_BYTES,
-    )?;
-    drop(files);
 
     let parsed = Image::parse(&image)?;
     let Some(store_info_root) = parsed.table_root("ObjectStoreInfo")? else {
@@ -360,18 +394,17 @@ fn probe(path: &Path) -> Result<Probe> {
     }))
 }
 
-fn records(matched: &Matched, store: i64, limit: usize) -> Result<Vec<Zeroizing<Vec<u8>>>> {
-    records_capped(matched, store, limit, MAX_IMAGE_BYTES)
-}
-
-fn records_capped(
+/// Calls `f` with the value of each record in `store`, borrowed from the
+/// image, for at most `limit` records whose values total at most `max_bytes`.
+fn scan_records(
     matched: &Matched,
     store: i64,
     limit: usize,
     max_bytes: usize,
-) -> Result<Vec<Zeroizing<Vec<u8>>>> {
+    mut f: impl FnMut(&[u8]) -> Result<()>,
+) -> Result<usize> {
     let parsed = Image::parse(&matched.image)?;
-    let mut out = Vec::new();
+    let mut count = 0usize;
     let mut copied = 0usize;
     parsed.scan(matched.records_root, |_, columns| {
         let [Column::Int(store_id), Column::Text(_) | Column::Blob(_), Column::Blob(value), Column::Null, ..] =
@@ -379,13 +412,29 @@ fn records_capped(
         else {
             return Err(ErrorCode::VaultFormatChanged);
         };
-        if *store_id == store && out.len() < limit {
+        if *store_id == store && count < limit {
             copied = copied
                 .checked_add(value.len())
                 .filter(|&n| n <= max_bytes)
                 .ok_or(ErrorCode::VaultFormatChanged)?;
-            out.push(Zeroizing::new(value.to_vec()));
+            count += 1;
+            f(value)?;
         }
+        Ok(())
+    })?;
+    Ok(count)
+}
+
+#[cfg(test)]
+fn records_capped(
+    matched: &Matched,
+    store: i64,
+    limit: usize,
+    max_bytes: usize,
+) -> Result<Vec<Zeroizing<Vec<u8>>>> {
+    let mut out = Vec::new();
+    scan_records(matched, store, limit, max_bytes, |value| {
+        out.push(Zeroizing::new(value.to_vec()));
         Ok(())
     })?;
     Ok(out)
@@ -413,11 +462,19 @@ fn bytes_field(record: &Value, name: &str) -> Result<Vec<u8>> {
 }
 
 fn read_key_ref(matched: &Matched) -> Result<StorageKeyRef> {
-    let mut blobs = records(matched, matched.key_id, 2)?;
-    if blobs.len() != 1 {
-        return Err(ErrorCode::VaultFormatChanged);
+    let mut found = None;
+    let count = scan_records(matched, matched.key_id, 2, MAX_IMAGE_BYTES, |value| {
+        found = Some(decode_key_ref(value)?);
+        Ok(())
+    })?;
+    match (count, found) {
+        (1, Some(key_ref)) => Ok(key_ref),
+        _ => Err(ErrorCode::VaultFormatChanged),
     }
-    let record = ssv::decode(&blobs.remove(0))?;
+}
+
+fn decode_key_ref(blob: &[u8]) -> Result<StorageKeyRef> {
+    let record = ssv::decode(blob)?;
     let adapter_key_id = match ssv::get(&record, "adapterKeyId") {
         None | Some(Value::Undefined | Value::Null) => None,
         Some(Value::String(s)) => Some(s.clone()),
@@ -436,24 +493,31 @@ fn read_key_ref(matched: &Matched) -> Result<StorageKeyRef> {
     })
 }
 
-fn read_items(matched: &Matched) -> Result<Vec<EncryptedItem>> {
-    let blobs = records(matched, matched.items_id, MAX_ITEMS + 1)?;
-    if blobs.len() > MAX_ITEMS {
-        return Err(ErrorCode::OutputTooLarge);
-    }
-    blobs
-        .iter()
-        .map(|blob| {
+fn read_items(matched: &Matched, f: &mut dyn FnMut(EncryptedItem) -> Result<()>) -> Result<()> {
+    let mut seen = 0usize;
+    scan_records(
+        matched,
+        matched.items_id,
+        usize::MAX,
+        MAX_IMAGE_BYTES,
+        |blob| {
+            seen += 1;
+            if seen > MAX_ITEMS {
+                return Err(ErrorCode::OutputTooLarge);
+            }
             let record = ssv::decode(blob)?;
-            Ok(EncryptedItem {
+            let item = EncryptedItem {
                 id: string_field(&record, "id")?,
                 issuer: string_field(&record, "issuer")?,
                 name: string_field(&record, "name")?,
                 order: int_field(&record, "order")?,
                 data: bytes_field(&record, "__encryptedData")?,
-            })
-        })
-        .collect()
+            };
+            drop(record);
+            f(item)
+        },
+    )?;
+    Ok(())
 }
 
 #[cfg(test)]

@@ -21,7 +21,10 @@ jobs:
           components: clippy, rustfmt
       - run: cargo fmt --check
       - run: cargo clippy --all-targets --locked -- -D warnings
+      - run: cargo clippy --all-targets --locked --features budget-probe -- -D warnings
       - run: cargo test --locked
+      - run: cargo test --locked --features budget-probe
+      - run: cargo test --locked --release --features budget-probe --test budget
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check

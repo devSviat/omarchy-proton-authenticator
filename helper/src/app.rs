@@ -61,17 +61,12 @@ fn check_source(source: i32) -> Result<()> {
     }
 }
 
-fn decode_view(cipher: &ItemCipher, item: &EncryptedItem, unix: u64) -> Result<EntryView> {
+fn decode_view(cipher: &ItemCipher, item: EncryptedItem, unix: u64) -> Result<EntryView> {
     let plain = cipher.decrypt(&item.data)?;
     let parsed: ItemPlaintext =
         serde_json::from_slice(&plain).map_err(|_| ErrorCode::VaultFormatChanged)?;
     drop(plain);
-    let entry = build_entry(
-        item.id.clone(),
-        item.issuer.clone(),
-        item.name.clone(),
-        parsed,
-    );
+    let entry = build_entry(item.id, item.issuer, item.name, parsed);
     Ok(view(&entry, unix))
 }
 
@@ -80,7 +75,8 @@ pub fn codes(
     keys: &dyn KeyProvider,
     req: &CodesRequest,
 ) -> Result<Vec<EntryView>> {
-    let (key_ref, mut items) = vault.load()?;
+    let snapshot = vault.snapshot()?;
+    let key_ref = snapshot.key_ref()?;
     check_source(key_ref.source)?;
     if key_ref.salt.len() != SALT_LEN {
         return Err(ErrorCode::VaultFormatChanged);
@@ -90,18 +86,23 @@ pub fn codes(
         return Err(ErrorCode::VaultFormatChanged);
     }
 
-    if !items.iter().all(|i| valid_item_id(&i.id)) {
-        return Err(ErrorCode::VaultFormatChanged);
-    }
-
-    if let Some(only) = &req.only {
-        items.retain(|i| &i.id == only);
-        if items.is_empty() {
-            return Err(ErrorCode::ItemNotFound);
+    let wanted = |item: &EncryptedItem| req.only.as_ref().is_none_or(|only| *only == item.id);
+    // The snapshot is walked twice: ids are validated before the keyring is
+    // touched, and ciphertexts are decrypted one at a time instead of all
+    // being held next to the 2 MiB image.
+    let mut matching = 0usize;
+    snapshot.for_each_item(&mut |item| {
+        if !valid_item_id(&item.id) {
+            return Err(ErrorCode::VaultFormatChanged);
         }
-    }
-    if items.is_empty() {
-        return Ok(Vec::new());
+        matching += usize::from(wanted(&item));
+        Ok(())
+    })?;
+    if matching == 0 {
+        return match req.only {
+            Some(_) => Err(ErrorCode::ItemNotFound),
+            None => Ok(Vec::new()),
+        };
     }
 
     if !req.allow_prompt {
@@ -118,10 +119,13 @@ pub fn codes(
     let cipher = ItemCipher::new(&storage_key);
     drop(storage_key);
 
-    let mut views = items
-        .iter()
-        .map(|item| decode_view(&cipher, item, req.unix))
-        .collect::<Result<Vec<_>>>()?;
+    let mut views = Vec::with_capacity(matching);
+    snapshot.for_each_item(&mut |item| {
+        if wanted(&item) {
+            views.push(decode_view(&cipher, item, req.unix)?);
+        }
+        Ok(())
+    })?;
     views.sort_by_cached_key(|v| (v.issuer.to_lowercase(), v.account.to_lowercase()));
     Ok(views)
 }

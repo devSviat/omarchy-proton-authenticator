@@ -14,6 +14,16 @@ path = "src/lib.rs"
 name = "pa-helper"
 path = "src/main.rs"
 
+# Test-only: measures the locked-memory peak of the real load path in a
+# process that links nothing but the helper library.
+[[bin]]
+name = "pa-budget-probe"
+path = "src/bin/pa-budget-probe.rs"
+required-features = ["budget-probe"]
+
+[features]
+budget-probe = []
+
 [dependencies]
 aes-gcm = { version = "0.11.1", default-features = false, features = ["aes", "alloc", "zeroize"] }
 hkdf = "0.13.0"
