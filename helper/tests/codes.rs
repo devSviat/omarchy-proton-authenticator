@@ -750,3 +750,46 @@ fn private_sorts_and_truncates_like_codes() {
     assert_eq!(last["issuer"].as_str().unwrap().chars().count(), 256);
     assert_eq!(last["account"].as_str().unwrap().chars().count(), 256);
 }
+
+#[test]
+fn private_fallback_source_is_unsafe_key_storage() {
+    let tmp = TempDir::new().unwrap();
+    let vault = vault_with(
+        tmp.path(),
+        &key_ref(Some("a"), &SALT, 2),
+        &[totp_item("ok", "GitHub", "me")],
+    );
+    let keys = FakeKeys::new(LockState::Unlocked);
+    for reveal in [None, Some("ok")] {
+        let err = codes_private(&vault, &keys, &private_req(reveal, true)).unwrap_err();
+        assert_eq!(err, ErrorCode::UnsafeKeyStorage);
+    }
+    assert_eq!(keys.lock_calls.get() + keys.root_calls.get(), 0);
+}
+
+#[test]
+fn identical_labels_order_by_id_in_every_mode() {
+    let tmp = TempDir::new().unwrap();
+    let vault = vault_with(
+        tmp.path(),
+        &key_ref(Some("a"), &SALT, 0),
+        &[
+            totp_item("c", "GitHub", "me"),
+            totp_item("a", "GitHub", "me"),
+            totp_item("b", "github", "ME"),
+        ],
+    );
+    let keys = FakeKeys::new(LockState::Unlocked);
+    let plain: Vec<String> = codes(&vault, &keys, &req(None, false))
+        .unwrap()
+        .into_iter()
+        .map(|v| v.id)
+        .collect();
+    assert_eq!(plain, ["a", "b", "c"]);
+    for reveal in [None, Some("a"), Some("b"), Some("c")] {
+        let json =
+            private_json(&codes_private(&vault, &keys, &private_req(reveal, false)).unwrap());
+        let ids: Vec<&str> = json.iter().map(|e| e["id"].as_str().unwrap()).collect();
+        assert_eq!(ids, plain, "reveal {reveal:?}");
+    }
+}

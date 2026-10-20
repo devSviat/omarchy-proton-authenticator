@@ -119,10 +119,11 @@ pub enum PrivateEntry {
 }
 
 impl PrivateEntry {
-    pub fn labels(&self) -> (&str, &str) {
+    /// `(id, issuer, account)`.
+    pub fn sort_fields(&self) -> (&str, &str, &str) {
         match self {
-            Self::Revealed(v) => (&v.issuer, &v.account),
-            Self::Hidden(h) => (&h.issuer, &h.account),
+            Self::Revealed(v) => (&v.id, &v.issuer, &v.account),
+            Self::Hidden(h) => (&h.id, &h.issuer, &h.account),
         }
     }
 }

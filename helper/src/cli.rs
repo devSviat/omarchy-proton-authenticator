@@ -42,10 +42,10 @@ impl Timeouts {
     pub fn for_command(&self, command: &Command) -> Duration {
         match command {
             Command::Codes {
+                mode,
                 allow_prompt: true,
                 demo: false,
-                ..
-            } => self.prompt,
+            } if mode.may_decrypt() => self.prompt,
             _ => self.run,
         }
     }
@@ -64,18 +64,36 @@ const DEFAULT_CLEAR_AFTER_SECS: u64 = 20;
 const READY: &str = "READY";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CodesMode {
+    All {
+        only: Option<String>,
+    },
+    /// Labels only, except the `reveal` entry.
+    Private {
+        reveal: Option<String>,
+    },
+}
+
+impl CodesMode {
+    /// Whether the call opens the keyring, and so may show an unlock prompt.
+    pub fn may_decrypt(&self) -> bool {
+        match self {
+            Self::All { .. } => true,
+            Self::Private { reveal } => reveal.is_some(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
     Version,
     Check {
         demo: bool,
     },
     Codes {
-        only: Option<String>,
+        mode: CodesMode,
         allow_prompt: bool,
         demo: bool,
-        /// Labels only, except the `reveal` entry; excludes `only`.
-        private: bool,
-        reveal: Option<String>,
     },
     Copy {
         id: String,
@@ -145,15 +163,15 @@ fn parse_codes(rest: &[&str]) -> Result<Command> {
             _ => return Err(ErrorCode::InvalidArgument),
         }
     }
-    if (reveal.is_some() && !private) || (private && only.is_some()) {
-        return Err(ErrorCode::InvalidArgument);
-    }
+    let mode = match (private, only, reveal) {
+        (false, only, None) => CodesMode::All { only },
+        (true, None, reveal) => CodesMode::Private { reveal },
+        _ => return Err(ErrorCode::InvalidArgument),
+    };
     Ok(Command::Codes {
-        only,
+        mode,
         allow_prompt,
         demo,
-        private,
-        reveal,
     })
 }
 
@@ -387,17 +405,14 @@ pub fn run(args: &[OsString], clipboard: &dyn Clipboard, timeouts: &Timeouts) ->
         })),
         Command::Check { demo } => render(check(demo)),
         Command::Codes {
-            private: true,
-            reveal,
+            mode: CodesMode::Private { reveal },
             allow_prompt,
             demo,
-            ..
         } => render(codes_private(reveal, allow_prompt, demo, timeouts)),
         Command::Codes {
-            only,
+            mode: CodesMode::All { only },
             allow_prompt,
             demo,
-            ..
         } => render(codes(only, allow_prompt, demo, timeouts)),
         Command::Copy {
             id,
@@ -429,31 +444,39 @@ mod tests {
         assert_eq!(
             parse_strs(&["codes", "--allow-prompt", "--only", "a:b", "--demo"]),
             Ok(Command::Codes {
-                only: Some("a:b".into()),
+                mode: CodesMode::All {
+                    only: Some("a:b".into())
+                },
                 allow_prompt: true,
                 demo: true,
-                private: false,
-                reveal: None,
             })
         );
         assert_eq!(
             parse_strs(&["codes", "--private", "--allow-prompt", "--reveal", "a:b"]),
             Ok(Command::Codes {
-                only: None,
+                mode: CodesMode::Private {
+                    reveal: Some("a:b".into())
+                },
                 allow_prompt: true,
                 demo: false,
-                private: true,
-                reveal: Some("a:b".into()),
             })
         );
         assert_eq!(
             parse_strs(&["codes", "--reveal", "a:b", "--private"]),
             Ok(Command::Codes {
-                only: None,
+                mode: CodesMode::Private {
+                    reveal: Some("a:b".into())
+                },
                 allow_prompt: false,
                 demo: false,
-                private: true,
-                reveal: Some("a:b".into()),
+            })
+        );
+        assert_eq!(
+            parse_strs(&["codes", "--private"]),
+            Ok(Command::Codes {
+                mode: CodesMode::Private { reveal: None },
+                allow_prompt: false,
+                demo: false,
             })
         );
         assert_eq!(
@@ -498,6 +521,21 @@ mod tests {
             timeouts.run
         );
         assert_eq!(budget(&["codes", "--private"]), timeouts.run);
+        assert_eq!(
+            budget(&["codes", "--private", "--allow-prompt"]),
+            timeouts.run
+        );
+        assert_eq!(
+            budget(&[
+                "codes",
+                "--private",
+                "--reveal",
+                "x",
+                "--allow-prompt",
+                "--demo"
+            ]),
+            timeouts.run
+        );
         assert_eq!(budget(&["codes", "--allow-prompt", "--demo"]), timeouts.run);
         assert_eq!(budget(&["copy", "x"]), timeouts.run);
         assert_eq!(budget(&["check"]), timeouts.run);

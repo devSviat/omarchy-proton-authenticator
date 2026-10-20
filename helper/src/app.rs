@@ -108,14 +108,22 @@ fn require_unlocked(keys: &dyn KeyProvider, key_id: &str) -> Result<()> {
     }
 }
 
+/// Ties on the labels fall back to the id, so revealing a row in privacy mode
+/// never moves rows with identical labels, and both modes order alike.
 pub fn sort_entries(views: &mut [EntryView]) {
-    views.sort_by_cached_key(|v| (v.issuer.to_lowercase(), v.account.to_lowercase()));
+    views.sort_by_cached_key(|v| {
+        (
+            v.issuer.to_lowercase(),
+            v.account.to_lowercase(),
+            v.id.clone(),
+        )
+    });
 }
 
 pub fn sort_private(entries: &mut [PrivateEntry]) {
     entries.sort_by_cached_key(|e| {
-        let (issuer, account) = e.labels();
-        (issuer.to_lowercase(), account.to_lowercase())
+        let (id, issuer, account) = e.sort_fields();
+        (issuer.to_lowercase(), account.to_lowercase(), id.to_owned())
     });
 }
 
