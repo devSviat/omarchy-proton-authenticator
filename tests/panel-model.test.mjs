@@ -1,0 +1,387 @@
+import { test } from "node:test"
+import assert from "node:assert/strict"
+import { loadModel } from "./load-model.mjs"
+
+const M = loadModel()
+const plain = (value) => JSON.parse(JSON.stringify(value))
+
+const full = (id, extra) => Object.assign({
+  id, issuer: id, account: "a", kind: "totp", code: "123456", nextCode: "654321",
+  period: 30, digits: 6, remaining: 20
+}, extra || {})
+const hidden = (id) => ({
+  id, issuer: id, account: "a", kind: null, code: null, nextCode: null,
+  period: null, digits: null, remaining: null
+})
+
+test("codesRequest normalizes mode and reveal id", () => {
+  assert.deepEqual(plain(M.codesRequest(false, "x")), { privateMode: false, revealId: "" })
+  assert.deepEqual(plain(M.codesRequest(true, "demo-a")), { privateMode: true, revealId: "demo-a" })
+  assert.deepEqual(plain(M.codesRequest(true, "-x")), { privateMode: true, revealId: "" })
+  assert.deepEqual(plain(M.codesRequest(true, null)), { privateMode: true, revealId: "" })
+  assert.deepEqual(plain(M.codesRequest(undefined)), { privateMode: true, revealId: "" })
+})
+
+test("codesArgs builds the helper arguments", () => {
+  assert.deepEqual(plain(M.codesArgs(M.codesRequest(false, ""))), ["codes"])
+  assert.deepEqual(plain(M.codesArgs(M.codesRequest(true, ""))), ["codes", "--private"])
+  assert.deepEqual(plain(M.codesArgs(M.codesRequest(true, "a:b"))), ["codes", "--private", "--reveal", "a:b"])
+})
+
+test("sameRequest compares mode and reveal id", () => {
+  assert.equal(M.sameRequest(M.codesRequest(true, "a"), M.codesRequest(true, "a")), true)
+  assert.equal(M.sameRequest(M.codesRequest(true, "a"), M.codesRequest(true, "b")), false)
+  assert.equal(M.sameRequest(M.codesRequest(false, ""), M.codesRequest(true, "")), false)
+  assert.equal(M.sameRequest(null, M.codesRequest(true, "")), false)
+})
+
+test("hideCodes keeps labels and only the revealed code", () => {
+  const out = M.hideCodes([full("a"), full("b"), null], "b")
+  assert.deepEqual(plain(out[0]), hidden("a"))
+  assert.equal(out[1].code, "123456")
+  assert.equal(out.length, 2)
+  assert.deepEqual(plain(M.hideCodes([full("a")], "")), [hidden("a")])
+})
+
+test("isHidden is true only for code-less private rows", () => {
+  assert.equal(M.isHidden(hidden("a")), true)
+  assert.equal(M.isHidden(full("a")), false)
+  assert.equal(M.isHidden(full("a", { kind: "unsupported", code: null, nextCode: null })), false)
+})
+
+test("liveRemaining counts down from the reply time", () => {
+  const e = full("a", { remaining: 20 })
+  assert.equal(M.liveRemaining(e, 1000, 1000), 20)
+  assert.equal(M.liveRemaining(e, 1000, 1007), 13)
+  assert.equal(M.liveRemaining(e, 1000, 1030), 0)
+  assert.equal(M.liveRemaining(hidden("a"), 1000, 1000), null)
+})
+
+test("refreshDelayMs targets the earliest boundary plus 300 ms", () => {
+  const entries = [full("a", { remaining: 20 }), full("b", { remaining: 7 }), hidden("c")]
+  assert.equal(M.refreshDelayMs(entries, 1000, 1000 * 1000), 7300)
+  assert.equal(M.refreshDelayMs(entries, 1000, 1000 * 1000 + 2500), 4800)
+  assert.equal(M.refreshDelayMs([hidden("c")], 1000, 1000 * 1000), -1)
+  assert.equal(M.refreshDelayMs([], 1000, 0), -1)
+})
+
+test("refreshDelayMs never schedules into the past", () => {
+  assert.equal(M.refreshDelayMs([full("a", { remaining: 1 })], 1000, 1010 * 1000), 1000)
+})
+
+test("selectionIndex falls back to the first row", () => {
+  const list = [full("a"), full("b")]
+  assert.equal(M.selectionIndex(list, "b"), 1)
+  assert.equal(M.selectionIndex(list, "zz"), 0)
+  assert.equal(M.selectionIndex([], "a"), -1)
+})
+
+test("moveSelection clamps at both ends", () => {
+  const list = [full("a"), full("b"), full("c")]
+  assert.equal(M.moveSelection(list, "a", 1), "b")
+  assert.equal(M.moveSelection(list, "c", 1), "c")
+  assert.equal(M.moveSelection(list, "b", -5), "a")
+  assert.equal(M.moveSelection(list, "missing", 1), "b")
+  assert.equal(M.moveSelection([], "a", 1), "")
+})
+
+test("initial takes the first character of the issuer, then the account", () => {
+  assert.equal(M.initial({ issuer: "github", account: "x" }), "G")
+  assert.equal(M.initial({ issuer: "  ", account: "zed" }), "Z")
+  assert.equal(M.initial({ issuer: "\u{1F600}x" }), "\u{1F600}")
+  assert.equal(M.initial({}), "?")
+})
+
+test("issuerLabel falls back to the account", () => {
+  assert.equal(M.issuerLabel({ issuer: "GitHub", account: "a" }), "GitHub")
+  assert.equal(M.issuerLabel({ issuer: "", account: "a" }), "a")
+  assert.equal(M.issuerLabel({}), "Unnamed")
+})
+
+test("maskedCode is grouped bullets", () => {
+  assert.equal(M.maskedCode(), "••• •••")
+})
+
+test("canCopy refuses unsupported entries", () => {
+  assert.equal(M.canCopy(full("a")), true)
+  assert.equal(M.canCopy(hidden("a")), false)
+  assert.equal(M.canCopy(full("a", { kind: "unsupported" })), false)
+  assert.equal(M.canCopy(null), false)
+})
+
+test("shellQuote wraps in single quotes", () => {
+  assert.equal(M.shellQuote("/home/u/p"), "'/home/u/p'")
+  assert.equal(M.shellQuote("/a b/it's"), "'/a b/it'\\''s'")
+})
+
+test("emptyState maps every status", () => {
+  const s = (status, extra) => M.emptyState(Object.assign({
+    status, entryCount: 0, matchCount: 0, codesRunning: false,
+    promptRunning: false, pluginDir: "/p", home: "/home/u"
+  }, extra || {}))
+  assert.deepEqual(plain(s("KEYRING_LOCKED")), { title: "Keyring is locked", detail: "", action: "unlock", actionLabel: "Unlock", command: "" })
+  assert.equal(s("KEYRING_LOCKED", { promptRunning: true }).title, "Waiting for keyring…")
+  assert.equal(s("KEYRING_LOCKED", { promptRunning: true }).action, "")
+  assert.equal(s("VAULT_NOT_FOUND").title, "Proton Authenticator not found")
+  assert.equal(s("VAULT_NOT_FOUND").action, "openProton")
+  for (const code of ["VAULT_FORMAT_CHANGED", "DECRYPT_FAILED"]) {
+    assert.equal(s(code).title, "Vault format not recognised — the app may have updated")
+    assert.equal(s(code).action, "openProton")
+  }
+  assert.equal(s("APP_LOCKED").title, "App lock is on — this plugin can't read a password-locked vault")
+  assert.equal(s("APP_LOCKED").action, "")
+  assert.equal(s("UNSAFE_KEY_STORAGE").title, "Proton is storing its key outside the keyring — open Proton and fix keyring access")
+  assert.equal(s("UNSAFE_KEY_STORAGE").action, "openProton")
+  for (const code of ["HELPER_MISSING", "HELPER_OUTDATED", "DEPENDENCY_MISSING"]) {
+    assert.equal(s(code).title, "Run install.sh")
+    assert.equal(s(code).detail, "cd /p\n./install.sh")
+    assert.equal(s(code).action, "copyCommand")
+    assert.equal(s(code).command, "cd '/p' && ./install.sh")
+  }
+  assert.equal(s("READY").title, "No accounts yet")
+  assert.equal(s("READY").action, "openProton")
+  assert.equal(s("READY", { codesRunning: true }).title, "Loading…")
+  assert.equal(s("LOADING").title, "Loading…")
+  assert.equal(s("READY", { entryCount: 3 }).title, "No matches")
+  assert.equal(s("READY", { entryCount: 3, matchCount: 3 }), null)
+  assert.equal(s("OUTPUT_TOO_LARGE").title, "More than 1000 accounts \u2014 the plugin reads at most 1000")
+  assert.equal(s("OUTPUT_TOO_LARGE").action, "openProton")
+  assert.equal(s("TIMEOUT").title, M.statusText("TIMEOUT"))
+  assert.equal(s("TIMEOUT").action, "retry")
+})
+
+test("syncLabel shows the age and the stale hint", () => {
+  const h = 3600
+  assert.deepEqual(plain(M.syncLabel(10 * h, 10 * h - 120, 24, true)), { text: "Updated 2 min ago", stale: false })
+  assert.deepEqual(plain(M.syncLabel(30 * h, 2 * h, 24, true)), { text: "Not synced for 1 d", stale: true })
+  assert.deepEqual(plain(M.syncLabel(30 * h, 2 * h, 24, false)), { text: "Updated 1 d ago", stale: false })
+  assert.deepEqual(plain(M.syncLabel(30 * h, 0, 24, true)), { text: "", stale: false })
+})
+
+test("heroMeta picks the subtitle by state", () => {
+  const base = { status: "READY", entryCount: 6, demo: false, promptRunning: false, nowSec: 10000, vaultMtime: 10000 - 120 }
+  const m = (extra) => M.heroMeta(Object.assign({}, base, extra || {}))
+  assert.equal(m(), "6 accounts · updated 2 min ago")
+  assert.equal(m({ entryCount: 1 }), "1 account · updated 2 min ago")
+  assert.equal(m({ vaultMtime: 0 }), "6 accounts")
+  assert.equal(m({ entryCount: 0 }), "updated 2 min ago")
+  assert.equal(m({ demo: true }), "Demo accounts")
+  assert.equal(m({ status: "KEYRING_LOCKED" }), "Keyring locked")
+  assert.equal(m({ status: "KEYRING_LOCKED", promptRunning: true }), "Waiting for keyring")
+  assert.equal(m({ status: "SOMETHING_NEW" }), "something new")
+  assert.equal(m({ status: "LOADING" }), "Checking")
+})
+
+test("heroBadge prefers privacy over demo", () => {
+  assert.equal(M.heroBadge(true, true), "PRIVATE")
+  assert.equal(M.heroBadge(false, true), "DEMO")
+  assert.equal(M.heroBadge(false, false), "")
+})
+
+test("loadDecision: privacy switches load now, selection moves debounce", () => {
+  const d = (extra) => M.loadDecision(Object.assign({
+    trigger: "change", opened: true, status: "READY",
+    last: M.codesRequest(true, "a"), wanted: M.codesRequest(true, "b")
+  }, extra || {}))
+  assert.equal(d(), "debounce")
+  assert.equal(d({ wanted: M.codesRequest(true, "a") }), "none")
+  assert.equal(d({ wanted: M.codesRequest(false, "") }), "now")
+  assert.equal(d({ last: null }), "now")
+  assert.equal(d({ opened: false }), "none")
+})
+
+test("loadDecision never retries while the status is an error", () => {
+  for (const status of ["KEYRING_LOCKED", "DECRYPT_FAILED", "KEY_NOT_FOUND", "KEYRING_UNAVAILABLE", "LOADING"]) {
+    const s = { opened: true, status, last: M.codesRequest(true, "x"), wanted: M.codesRequest(true, "") }
+    assert.equal(M.loadDecision(Object.assign({ trigger: "change" }, s)), "none", status)
+    assert.equal(M.loadDecision(Object.assign({ trigger: "refresh" }, s)), "none", status)
+  }
+})
+
+test("loadDecision refreshes at a period boundary even with an unchanged request", () => {
+  const r = M.codesRequest(true, "a")
+  assert.equal(M.loadDecision({ trigger: "refresh", opened: true, status: "READY", last: r, wanted: r }), "now")
+  assert.equal(M.loadDecision({ trigger: "refresh", opened: false, status: "READY", last: r, wanted: r }), "none")
+})
+
+test("a failed reveal keeps labels, so the selection and request stay put", () => {
+  const entries = [full("a"), full("b")]
+  const kept = M.hideCodes(entries, "")
+  const list = M.filterAndOrder(kept, "", M.emptyPrefs())
+  const wanted = M.codesRequest(true, list[M.selectionIndex(list, "b")].id)
+  assert.equal(M.loadDecision({ trigger: "change", opened: true, status: "READY", last: M.codesRequest(true, "b"), wanted }), "none")
+})
+
+test("keepsLabels only after keyring or item-level errors", () => {
+  for (const e of ["KEYRING_LOCKED", "KEYRING_UNAVAILABLE", "KEY_NOT_FOUND", "ITEM_NOT_FOUND"]) assert.equal(M.keepsLabels(e), true, e)
+  for (const e of ["VAULT_FORMAT_CHANGED", "DECRYPT_FAILED", "HELPER_MISSING", "HELPER_OUTDATED", "VAULT_NOT_FOUND", "TIMEOUT", "INTERNAL"])
+    assert.equal(M.keepsLabels(e), false, e)
+})
+
+test("reloadAfterCheck skips the reload right after a successful unlock", () => {
+  const c = (extra) => M.reloadAfterCheck(Object.assign({
+    ready: true, panelOpen: true, codesFailed: false, mtimeChanged: false, wasReady: false, codesFresh: true
+  }, extra || {}))
+  assert.equal(c(), false)
+  assert.equal(c({ codesFresh: false }), true)
+  assert.equal(c({ wasReady: true, codesFresh: false }), false)
+  assert.equal(c({ mtimeChanged: true }), true)
+  assert.equal(c({ codesFailed: true }), true)
+  assert.equal(c({ ready: false, codesFailed: true }), false)
+  assert.equal(c({ panelOpen: false, mtimeChanged: true }), false)
+})
+
+test("revealIdFor reveals only a row the user chose", () => {
+  const e = { id: "a" }
+  assert.equal(M.revealIdFor(true, e, true), "a")
+  assert.equal(M.revealIdFor(true, e, false), "")
+  assert.equal(M.revealIdFor(true, e, undefined), "")
+  assert.equal(M.revealIdFor(false, e, true), "")
+  assert.equal(M.revealIdFor(false, e, false), "")
+  assert.equal(M.revealIdFor(true, null, true), "")
+})
+
+test("privacy mode reveals nothing on open until a row is chosen", () => {
+  const rows = [hidden("a"), hidden("b")]
+  const at = (selectedId, chosen) => {
+    const entry = rows[M.selectionIndex(rows, selectedId)]
+    return M.codesRequest(true, M.revealIdFor(true, entry, chosen))
+  }
+  assert.deepEqual(plain(at("", false)), { privateMode: true, revealId: "" })
+  assert.deepEqual(plain(at(M.moveSelection(rows, "", 1), true)), { privateMode: true, revealId: "b" })
+  assert.deepEqual(plain(at("a", true)), { privateMode: true, revealId: "a" })
+})
+
+test("issuerGlyph normalizes case, spacing, punctuation and domains", () => {
+  const gh = M.issuerGlyph("GitHub")
+  assert.notEqual(gh, "")
+  for (const name of ["github", "github.com", "Git Hub", "GITHUB", "GitHub (work)", "www.github.com", "Git-Hub"])
+    assert.equal(M.issuerGlyph(name), gh, name)
+  assert.equal(M.issuerGlyph("accounts.google.com"), M.issuerGlyph("Google"))
+})
+
+test("issuerGlyph maps aliases to one glyph", () => {
+  assert.equal(M.issuerGlyph("Gmail"), M.issuerGlyph("Google"))
+  assert.equal(M.issuerGlyph("Google Workspace"), M.issuerGlyph("Google"))
+  assert.equal(M.issuerGlyph("Amazon Web Services"), M.issuerGlyph("AWS"))
+  assert.notEqual(M.issuerGlyph("AWS"), M.issuerGlyph("Amazon"))
+  assert.equal(M.issuerGlyph("X"), M.issuerGlyph("Twitter"))
+  assert.equal(M.issuerGlyph("x.com"), M.issuerGlyph("Twitter"))
+  assert.equal(M.issuerGlyph("Microsoft Account"), M.issuerGlyph("Microsoft"))
+  assert.equal(M.issuerGlyph("ChatGPT"), M.issuerGlyph("OpenAI"))
+})
+
+test("issuerGlyph returns empty for unknown and prototype-like issuers", () => {
+  for (const name of ["Hetzner", "Tailscale", "Proton", "", null, undefined, "constructor", "__proto__", "toString", "hasOwnProperty"])
+    assert.equal(M.issuerGlyph(name), "", String(name))
+  assert.equal(M.issuerGlyph("Gitea (home) server"), M.issuerGlyph("gitea"))
+})
+
+test("NO_FALLBACK only lists keys that have a glyph", () => {
+  for (const key of M.NO_FALLBACK) assert.equal(typeof M.ISSUER_GLYPHS[key], "string", key)
+})
+
+test("issuerGlyph never falls back to short or common-word keys", () => {
+  for (const name of ["Live Nation", "X-Plane", "X Bank", "Steam Plumbing", "Medium Rare"])
+    assert.equal(M.issuerGlyph(name), "", name)
+  assert.notEqual(M.issuerGlyph("X"), "")
+  assert.equal(M.issuerGlyph("X"), M.issuerGlyph("Twitter"))
+  assert.equal(M.issuerGlyph("Live"), M.issuerGlyph("Microsoft"))
+  assert.equal(M.issuerGlyph("Steam"), M.issuerGlyph("steampowered.com"))
+})
+
+test("installDisplay shortens home and quotes odd paths", () => {
+  assert.equal(M.installDisplay("/home/u/.config/omarchy/plugins/sviat.proton-authenticator", "/home/u"),
+               "cd ~/.config/omarchy/plugins/sviat.proton-authenticator\n./install.sh")
+  assert.equal(M.installDisplay("/home/uu/p", "/home/u"), "cd /home/uu/p\n./install.sh")
+  assert.equal(M.installDisplay("/home/u/My Plugins/p", "/home/u"), "cd '/home/u/My Plugins/p'\n./install.sh")
+  assert.equal(M.installCommand("/home/u/p"), "cd '/home/u/p' && ./install.sh")
+})
+
+test("searchCount reads the same with or without privacy", () => {
+  assert.equal(M.searchCount("", 6, 6), "6 accounts")
+  assert.equal(M.searchCount("  ", 6, 6), "6 accounts")
+  assert.equal(M.searchCount("", 1, 1), "1 account")
+  assert.equal(M.searchCount("gh", 6, 1), "1 / 6")
+  assert.equal(M.searchCount("", 0, 0), "")
+})
+
+test("footerHints follow what Enter does", () => {
+  const st = (action) => ({ title: "t", detail: "", action, actionLabel: "", command: "" })
+  assert.equal(M.footerHints(st("unlock"), false, 0).full, "\u21b5 unlock")
+  assert.equal(M.footerHints(st("openProton"), false, 0).full, "\u21b5 open Proton")
+  assert.equal(M.footerHints(st("retry"), false, 0).full, "\u21b5 retry")
+  assert.equal(M.footerHints(st("copyCommand"), false, 0).full, "\u21b5 copy command")
+  assert.equal(M.footerHints(st("unlock"), true, 6).full, "\u21b5 unlock")
+  assert.equal(M.footerHints(st(""), false, 0).full, "")
+  assert.equal(M.footerHints(null, false, 0).full, "")
+  assert.deepEqual(plain(M.footerHints(null, false, 6)), { full: "\u21b5 copy \u00b7 ^P pin \u00b7 ^H hide", compact: "\u21b5 copy \u00b7 ^H hide" })
+  assert.equal(M.footerHints(null, true, 6).full, "\u21b5 copy \u00b7 ^P pin \u00b7 ^H show")
+  assert.equal(M.footerHints(st("constructor"), false, 0).full, "")
+})
+
+test("a copy while open does not move the row; reopening applies it", () => {
+  const entries = [full("a"), full("b"), full("c")]
+  const atOpen = M.emptyPrefs()
+  const snapshot = atOpen.recent.slice()
+  const afterCopy = M.withRecent(atOpen, "c")
+  const ids = (list) => plain(list.map((e) => e.id))
+  assert.deepEqual(ids(M.filterAndOrder(entries, "", afterCopy, snapshot)), ["a", "b", "c"])
+  assert.deepEqual(ids(M.filterAndOrder(entries, "", afterCopy, afterCopy.recent.slice())), ["c", "a", "b"])
+  assert.deepEqual(ids(M.filterAndOrder(entries, "", afterCopy)), ["c", "a", "b"])
+})
+
+test("pinning reorders at once even with a recent snapshot", () => {
+  const entries = [full("a"), full("b"), full("c")]
+  const prefs = M.withRecent(M.emptyPrefs(), "b")
+  const snapshot = prefs.recent.slice()
+  const ids = (list) => plain(list.map((e) => e.id))
+  assert.deepEqual(ids(M.filterAndOrder(entries, "", prefs, snapshot)), ["b", "a", "c"])
+  const pinned = M.withPinned(prefs, "c", true)
+  assert.deepEqual(ids(M.filterAndOrder(entries, "", pinned, snapshot)), ["c", "b", "a"])
+  const unpinned = M.withPinned(pinned, "c", false)
+  assert.deepEqual(ids(M.filterAndOrder(entries, "", unpinned, snapshot)), ["b", "a", "c"])
+})
+
+test("search ties follow the snapshot, not the live recent list", () => {
+  const entries = [full("a", { issuer: "Gamma" }), full("b", { issuer: "Gold" })]
+  const ids = (list) => plain(list.map((e) => e.id))
+  assert.deepEqual(ids(M.filterAndOrder(entries, "g", M.withRecent(M.emptyPrefs(), "b"), [])), ["a", "b"])
+  assert.deepEqual(ids(M.filterAndOrder(entries, "g", M.emptyPrefs(), ["b"])), ["b", "a"])
+})
+
+test("versionStatus accepts only the manifest's version", () => {
+  const ok = (version) => ({ ok: true, protocol: 1, version })
+  assert.equal(M.versionStatus(ok("0.1.0"), "0.1.0"), "READY")
+  assert.equal(M.versionStatus(ok("0.0.9"), "0.1.0"), "HELPER_OUTDATED")
+  assert.equal(M.versionStatus(ok("0.1.0"), ""), "HELPER_OUTDATED")
+  assert.equal(M.versionStatus(ok("0.1.0"), undefined), "HELPER_OUTDATED")
+  assert.equal(M.versionStatus(ok(1), "1"), "HELPER_OUTDATED")
+  assert.equal(M.versionStatus({ ok: true, protocol: 1 }, "0.1.0"), "HELPER_OUTDATED")
+  assert.equal(M.versionStatus(M.failure("HELPER_MISSING"), "0.1.0"), "HELPER_MISSING")
+  assert.equal(M.versionStatus(M.failure("MEMLOCK_FAILED"), "0.1.0"), "MEMLOCK_FAILED")
+  assert.equal(M.versionStatus(null, "0.1.0"), "INTERNAL")
+})
+
+test("serviceStatus puts a helper problem first", () => {
+  assert.equal(M.serviceStatus("HELPER_OUTDATED", "KEYRING_LOCKED", "READY"), "HELPER_OUTDATED")
+  assert.equal(M.serviceStatus("HELPER_MISSING", "", "READY"), "HELPER_MISSING")
+  assert.equal(M.serviceStatus("READY", "KEYRING_LOCKED", "READY"), "KEYRING_LOCKED")
+  assert.equal(M.serviceStatus("READY", "", "VAULT_BUSY"), "VAULT_BUSY")
+  assert.equal(M.serviceStatus("", "", "LOADING"), "LOADING")
+  assert.equal(M.serviceStatus("", "", "READY"), "LOADING")
+})
+
+test("Enter on an empty-state action chooses no row", () => {
+  const base = { entryCount: 0, matchCount: 0, codesRunning: false, promptRunning: false, pluginDir: "/p", home: "/h" }
+  const locked = M.emptyState(Object.assign({ status: "KEYRING_LOCKED" }, base))
+  const noMatches = M.emptyState(Object.assign({ status: "READY", entryCount: 2 }, base, { entryCount: 2 }))
+  assert.equal(M.enterChoosesRow(locked), false)
+  assert.equal(M.enterChoosesRow(M.emptyState(Object.assign({ status: "TIMEOUT" }, base))), false)
+  assert.equal(M.enterChoosesRow(noMatches), false)
+  assert.equal(M.enterChoosesRow(null), true)
+  // Labels arrive after Unlock: the default first row stays hidden.
+  const rows = [hidden("a"), hidden("b")]
+  const chosen = M.enterChoosesRow(locked)
+  assert.equal(M.revealIdFor(true, rows[M.selectionIndex(rows, "")], chosen), "")
+})

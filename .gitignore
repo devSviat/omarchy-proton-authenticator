@@ -1,3 +1,4 @@
 .superpowers/
 /bin/pa-helper
 target/
+/helper/target/

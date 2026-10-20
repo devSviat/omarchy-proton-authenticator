@@ -1,0 +1,62 @@
+{
+  "schemaVersion": 1,
+  "id": "sviat.proton-authenticator",
+  "name": "Proton Authenticator",
+  "version": "0.1.0",
+  "author": "devSviat",
+  "license": "MIT",
+  "description": "Your Proton Authenticator 2FA codes in a keyboard-driven bar panel. Reads the local vault read-only; secrets never leave a small hardened helper.",
+  "kinds": [
+    "service",
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "service": "Service.qml",
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "Proton Authenticator",
+    "description": "Search your 2FA accounts and copy a code with Enter.",
+    "category": "Security",
+    "aliases": [
+      "2fa",
+      "totp",
+      "otp",
+      "authenticator",
+      "proton"
+    ],
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "clearClipboardSeconds": 20,
+      "closeOnCopy": true,
+      "staleHours": 24
+    },
+    "schema": [
+      {
+        "key": "clearClipboardSeconds",
+        "type": "integer",
+        "label": "Clear clipboard after (seconds)",
+        "min": 5,
+        "max": 120,
+        "step": 5,
+        "defaultValue": 20
+      },
+      {
+        "key": "closeOnCopy",
+        "type": "boolean",
+        "label": "Close the panel after copying",
+        "defaultValue": true
+      },
+      {
+        "key": "staleHours",
+        "type": "integer",
+        "label": "Warn when the vault has not synced for (hours)",
+        "min": 1,
+        "max": 168,
+        "step": 1,
+        "defaultValue": 24
+      }
+    ]
+  }
+}

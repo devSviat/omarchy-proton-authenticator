@@ -1,0 +1,54 @@
+[package]
+name = "pa-helper"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.89"
+publish = false
+license = "MIT"
+
+[lib]
+name = "pa_helper"
+path = "src/lib.rs"
+
+[[bin]]
+name = "pa-helper"
+path = "src/main.rs"
+
+# Test-only: measures the locked-memory peak of the real load path in a
+# process that links nothing but the helper library.
+[[bin]]
+name = "pa-budget-probe"
+path = "src/bin/pa-budget-probe.rs"
+required-features = ["budget-probe"]
+
+[features]
+budget-probe = []
+
+[dependencies]
+aes-gcm = { version = "0.11.1", default-features = false, features = ["aes", "alloc", "zeroize"] }
+hkdf = "0.13.0"
+hmac = { version = "0.13.0", features = ["zeroize"] }
+libc = "0.2.191"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+sha1 = { version = "0.11.0", features = ["zeroize"] }
+sha2 = { version = "0.11.0", features = ["zeroize"] }
+zeroize = { version = "1.9.1", features = ["serde"] }
+
+[profile.release]
+panic = "abort"
+lto = true
+codegen-units = 1
+strip = true
+
+[dev-dependencies]
+rusqlite = { version = "0.40.2", features = ["collation"] }
+tempfile = "3.27.0"
+
+[[test]]
+name = "hardening"
+harness = false
+
+[[test]]
+name = "copy_detach"
+harness = false
