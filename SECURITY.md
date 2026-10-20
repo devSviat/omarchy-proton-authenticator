@@ -27,6 +27,6 @@ process arguments, environment, logs, the QML scene, notifications or clipboard 
 the Proton vault or its directory, reach the network, crash or hang on a malformed vault, or run
 code it should not.
 
-Out of scope, by design (see the README's threat model): malware already running as the same user,
+Out of scope, by design (see the [threat model](docs/security.md)): malware already running as the same user,
 which can read the vault key from the Secret Service directly, and clipboard managers that persist
 the selection beyond the plugin's clear deadline.
