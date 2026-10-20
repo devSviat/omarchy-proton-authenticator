@@ -99,7 +99,7 @@ Item {
           var line = Model.replyLine(proc.buffer)
           if (line !== null) {
             proc.deliver(Model.parseReply(line))
-          } else if (proc.buffer.length > Model.MAX_REPLY_BYTES) {
+          } else if (proc.buffer.length > Model.MAX_REPLY_CHARS) {
             proc.deliver(Model.failure("OUTPUT_TOO_LARGE"))
             proc.running = false
           }

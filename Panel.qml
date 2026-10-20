@@ -19,13 +19,20 @@ Panel {
   readonly property color foreground: bar ? bar.foreground : Color.foreground
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
 
-  onOpenedChanged: {
-    if (!root.service) return
-    if (root.opened) root.service.panelOpened(root)
-    else root.service.panelClosed(root)
+  // The service can appear after the panel, or be reloaded while it is open.
+  property var registeredWith: null
+
+  function syncRegistration() {
+    var target = root.opened ? root.service : null
+    if (root.registeredWith === target) return
+    if (root.registeredWith) root.registeredWith.panelClosed(root)
+    root.registeredWith = target
+    if (target) target.panelOpened(root)
   }
 
-  Component.onDestruction: if (root.service) root.service.panelClosed(root)
+  onOpenedChanged: root.syncRegistration()
+  onServiceChanged: root.syncRegistration()
+  Component.onDestruction: if (root.registeredWith) root.registeredWith.panelClosed(root)
 
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight

@@ -10,6 +10,11 @@ test("pluginDirFromUrl strips the scheme and trailing slash", () => {
   assert.equal(M.pluginDirFromUrl("/home/u/p"), "/home/u/p")
 })
 
+test("pluginDirFromUrl percent-decodes the path", () => {
+  assert.equal(M.pluginDirFromUrl("file:///home/u/My%20Plugins/p/"), "/home/u/My Plugins/p")
+  assert.equal(M.pluginDirFromUrl("file:///home/u/%E2%9C%93"), "/home/u/\u2713")
+})
+
 test("validId follows the helper rule", () => {
   for (const id of ["demo-github", "A.b:c_d-", "x".repeat(128)]) assert.equal(M.validId(id), true, id)
   for (const id of ["", "-x", "--demo", "a/b", "a b", "x".repeat(129), null, 7]) assert.equal(M.validId(id), false, String(id))
@@ -34,8 +39,22 @@ test("parseReply maps the envelope", () => {
 })
 
 test("parseReply treats garbage and other protocols as an outdated helper", () => {
-  for (const text of ["", "not json", "[]", "null", '"READY"', '{"ok":true,"protocol":2}', '{"ok":true}'])
+  for (const text of ["not json", "[]", "null", '"READY"', '{"ok":true,"protocol":2}', '{"ok":true}'])
     assert.deepEqual(plain(M.parseReply(text)), { ok: false, error: "HELPER_OUTDATED" }, text)
+})
+
+test("parseReply treats empty output as a crash", () => {
+  for (const text of ["", "  \n", null])
+    assert.deepEqual(plain(M.parseReply(text)), { ok: false, error: "INTERNAL" }, String(text))
+})
+
+test("applyEdits replays queued edits on top of the loaded prefs", () => {
+  const stored = { pinned: ["keep"], recent: ["r1", "r2"], privacy: true }
+  const edits = [M.pinEdit("new", true), M.recentEdit("r2"), M.pinEdit("keep", false), M.pinEdit("bad id", true)]
+  assert.deepEqual(plain(M.applyEdits(stored, edits)), { pinned: ["new"], recent: ["r2", "r1"], privacy: true })
+  assert.deepEqual(plain(M.applyEdits(stored, [])), stored)
+  assert.equal(M.applyEdits(stored, [M.privacyEdit(false)]).privacy, false)
+  assert.deepEqual(plain(stored), { pinned: ["keep"], recent: ["r1", "r2"], privacy: true })
 })
 
 test("prefs edits keep ids unique and recent capped", () => {

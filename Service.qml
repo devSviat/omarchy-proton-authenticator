@@ -32,6 +32,11 @@ Item {
   property int vaultMtime: 0
   property var prefs: Model.emptyPrefs()
 
+  // Until the stored prefs are read, privacy is assumed on, so a failed
+  // read can never expose codes the user chose to hide.
+  property bool prefsLoaded: false
+  readonly property bool privacyEffective: !root.prefsLoaded || root.prefs.privacy === true
+
   // The demo vault has a fixed, old mtime.
   readonly property bool staleHintAllowed: !root.demo
 
@@ -51,10 +56,17 @@ Item {
 
   // prefs set calls are serialized: a writer killed mid-write leaves a temp
   // file that makes the next set fail for up to 30 s. The latest wanted state
-  // waits here and is written whole, so a failed write is retried with the
-  // next change.
+  // waits here and is written whole. A failed write is retried after the next
+  // successful check, or superseded by the next change.
+  property bool prefsLoading: false
   property bool prefsWriting: false
   property var prefsWanted: null
+  property var prefsRetry: null
+  // Edits made before the stored prefs were read; replayed on top of them,
+  // because writing before a read would wipe the stored pins and privacy.
+  property var prefsEdits: []
+  // Bumped on a demo switch, so a prefs read in flight cannot cross over.
+  property int prefsGeneration: 0
 
   signal changed()
 
@@ -97,8 +109,13 @@ Item {
       } else {
         root.checkStatus = reply.error
       }
-      root.applyStatus()
-      if (root.panelOpen && before !== 0 && root.vaultMtime !== before)
+      var codesFailed = root.codesError !== ""
+      // A locked keyring or a broken vault must not leave old codes on screen.
+      if (root.checkStatus !== "READY") root.clearCodes()
+      else root.applyStatus()
+      if (reply.ok) root.retryPrefs()
+      if (root.checkStatus === "READY" && root.panelOpen
+          && (codesFailed || root.vaultMtime !== before))
         root.loadCodes(root.lastOnlyId)
     })
   }
@@ -145,6 +162,7 @@ Item {
         if (root.panelOpen) root.loadCodes(next)
       }
       root.flushPrefs()
+      root.loadPrefs()
     })
   }
 
@@ -183,43 +201,99 @@ Item {
     Quickshell.execDetached(["/usr/bin/proton-authenticator"])
   }
 
+  // Demo prefs live in memory only: demo ids never reach the real file, and
+  // the real prefs never show up in demo state.
+  function resetPrefs() {
+    root.prefsGeneration++
+    root.prefs = Model.emptyPrefs()
+    root.prefsEdits = []
+    root.prefsWanted = null
+    root.prefsRetry = null
+    root.prefsLoading = false
+    root.prefsLoaded = root.demo
+    if (!root.demo) root.loadPrefs()
+  }
+
+  onDemoChanged: {
+    root.clearCodes()
+    root.resetPrefs()
+    root.refreshStatus()
+  }
+
   function loadPrefs() {
-    if (root.promptRunning) return
+    if (root.demo || root.prefsLoaded || root.prefsLoading || root.promptRunning) return
+    var generation = root.prefsGeneration
+    root.prefsLoading = true
     helper.call(["prefs", "get"], "", function(reply) {
-      if (reply.ok && root.prefsWanted === null && !root.prefsWriting)
-        root.prefs = Model.normalizePrefs(reply)
+      if (generation !== root.prefsGeneration) return
+      root.prefsLoading = false
+      if (!reply.ok) return
+      var edits = root.prefsEdits
+      root.prefsEdits = []
+      root.prefs = Model.applyEdits(Model.normalizePrefs(reply), edits)
+      root.prefsLoaded = true
+      if (edits.length > 0) root.writePrefs(root.prefs)
     })
   }
 
+  function retryPrefs() {
+    if (root.demo) return
+    if (!root.prefsLoaded) {
+      root.loadPrefs()
+      return
+    }
+    if (root.prefsRetry !== null && root.prefsWanted === null) {
+      root.prefsWanted = root.prefsRetry
+      root.prefsRetry = null
+      root.flushPrefs()
+    }
+  }
+
+  function editPrefs(edit) {
+    root.prefs = Model.applyEdits(root.prefs, [edit])
+    if (root.demo) return
+    if (!root.prefsLoaded) {
+      root.prefsEdits = root.prefsEdits.concat([edit])
+      root.loadPrefs()
+      return
+    }
+    root.writePrefs(root.prefs)
+  }
+
   function setPinned(id, pinned) {
-    if (Model.validId(id)) writePrefs(Model.withPinned(root.prefs, id, pinned === true))
+    if (Model.validId(id)) editPrefs(Model.pinEdit(id, pinned === true))
   }
 
   function noteRecent(id) {
-    if (Model.validId(id)) writePrefs(Model.withRecent(root.prefs, id))
+    if (Model.validId(id)) editPrefs(Model.recentEdit(id))
   }
 
   function setPrivacy(on) {
-    writePrefs(Model.withPrivacy(root.prefs, on === true))
+    editPrefs(Model.privacyEdit(on === true))
   }
 
   function writePrefs(next) {
-    root.prefs = next
     root.prefsWanted = next
+    root.prefsRetry = null
     root.flushPrefs()
   }
 
   function flushPrefs() {
-    if (root.prefsWriting || root.promptRunning || root.prefsWanted === null) return
+    if (root.demo || !root.prefsLoaded || root.prefsWriting || root.promptRunning
+        || root.prefsWanted === null) return
     var next = root.prefsWanted
+    var generation = root.prefsGeneration
     root.prefsWanted = null
     root.prefsWriting = true
     helper.call(["prefs", "set"], JSON.stringify(next), function(reply) {
       root.prefsWriting = false
+      if (generation !== root.prefsGeneration) return
       if (root.prefsWanted !== null) {
         root.flushPrefs()
       } else if (reply.ok) {
         root.prefs = Model.normalizePrefs(reply)
+      } else {
+        root.prefsRetry = next
       }
     })
   }

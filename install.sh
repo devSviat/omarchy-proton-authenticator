@@ -4,6 +4,12 @@
 # Run it from a clone: ./install.sh
 # Nothing here uses sudo; missing packages are named, not installed.
 
+# Sourcing would run this inside the caller's shell, set -e and all.
+if [[ -n ${BASH_SOURCE[0]:-} && ${BASH_SOURCE[0]} != "$0" ]]; then
+  echo "install.sh: run it, do not source it: ./install.sh" >&2
+  return 1
+fi
+
 set -euo pipefail
 
 PLUGIN_ID="sviat.proton-authenticator"
@@ -17,7 +23,7 @@ if [[ -z $script || ! -f $script ]]; then
 fi
 REPO="$(cd "$(dirname "$script")" && pwd -P)"
 if [[ ! "$REPO/install.sh" -ef "$script" || ! -f "$REPO/helper/Cargo.toml" ]] ||
-  ! grep -q "\"id\": \"$PLUGIN_ID\"" "$REPO/manifest.json" 2>/dev/null; then
+  ! grep -qF "\"id\": \"$PLUGIN_ID\"," "$REPO/manifest.json" 2>/dev/null; then
   echo "install.sh: $script is not inside a $PLUGIN_ID checkout." >&2
   exit 1
 fi
@@ -70,7 +76,13 @@ CARGO_TARGET_DIR="$TARGET_DIR" "$CARGO" build --release --locked \
 mkdir -p "$REPO/bin"
 install -m 0755 "$TARGET_DIR/release/pa-helper" "$REPO/bin/pa-helper"
 
-reply="$("$REPO/bin/pa-helper" version)"
+if ! reply="$("$REPO/bin/pa-helper" version)"; then
+  echo "install.sh: bin/pa-helper was built but does not run: $reply" >&2
+  if [[ $reply == *MEMLOCK_FAILED* ]]; then
+    echo "  It locks its memory and needs ulimit -l of at least 8192 KiB (now: $(ulimit -l))." >&2
+  fi
+  exit 1
+fi
 if [[ ! $reply =~ \"protocol\":1[,}] ]]; then
   echo "install.sh: bin/pa-helper does not speak protocol 1: $reply" >&2
   exit 1
