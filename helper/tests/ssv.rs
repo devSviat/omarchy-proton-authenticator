@@ -1,0 +1,251 @@
+mod support;
+
+use pa_helper::error::ErrorCode;
+use pa_helper::ssv::{decode, get, Value};
+use support::ssv_writer::{encode, encode_with_version, write_string_body};
+use zeroize::Zeroizing;
+
+fn bytes(b: &[u8]) -> Value {
+    Value::Bytes(Zeroizing::new(b.to_vec()))
+}
+
+fn s(v: &str) -> Value {
+    Value::String(v.to_string())
+}
+
+fn obj(props: Vec<(&str, Value)>) -> Value {
+    Value::Object(props.into_iter().map(|(k, v)| (k.to_string(), v)).collect())
+}
+
+fn item() -> Value {
+    obj(vec![
+        ("id", s("a1")),
+        ("issuer", s("GitHub")),
+        ("name", s("me")),
+        ("order", Value::Int(3)),
+        ("__encryptedData", bytes(&[9; 40])),
+    ])
+}
+
+fn storage_key() -> Value {
+    obj(vec![
+        ("source", Value::Int(0)),
+        ("salt", bytes(&[7; 32])),
+        ("id", s("k")),
+        ("adapterKeyId", s("adapter::0::abc")),
+        ("unsafe_key", Value::Undefined),
+    ])
+}
+
+fn fmt_changed<T: std::fmt::Debug>(r: Result<T, ErrorCode>) {
+    assert_eq!(r.unwrap_err(), ErrorCode::VaultFormatChanged);
+}
+
+#[test]
+fn roundtrip_item_shape() {
+    let v = item();
+    assert_eq!(decode(&encode(&v)).unwrap(), v);
+}
+
+#[test]
+fn roundtrip_storage_key_shape() {
+    let v = storage_key();
+    assert_eq!(decode(&encode(&v)).unwrap(), v);
+}
+
+#[test]
+fn roundtrip_scalars_and_nesting() {
+    let v = obj(vec![
+        ("n", Value::Null),
+        ("t", Value::Bool(true)),
+        ("f", Value::Bool(false)),
+        ("one", Value::Int(1)),
+        ("neg", Value::Int(-5)),
+        ("d", Value::Double(1.5)),
+        ("e", s("")),
+        ("inner", obj(vec![("x", Value::Int(70000))])),
+    ]);
+    assert_eq!(decode(&encode(&v)).unwrap(), v);
+}
+
+#[test]
+fn get_finds_property() {
+    let v = item();
+    assert_eq!(get(&v, "issuer"), Some(&s("GitHub")));
+    assert_eq!(get(&v, "missing"), None);
+    assert_eq!(get(&Value::Null, "id"), None);
+}
+
+#[test]
+fn utf16_string() {
+    let v = obj(vec![("issuer", s("Привіт"))]);
+    let blob = encode(&v);
+    let mut utf16_marker = Vec::new();
+    write_string_body(&mut utf16_marker, "Привіт");
+    assert_eq!(utf16_marker[3] & 0x80, 0);
+    assert_eq!(decode(&blob).unwrap(), v);
+}
+
+#[test]
+fn rejects_unknown_version() {
+    fmt_changed(decode(&encode_with_version(14, &item())));
+    fmt_changed(decode(&encode_with_version(16, &item())));
+}
+
+#[test]
+fn rejects_string_pool_ref() {
+    let mut blob = 15u32.to_le_bytes().to_vec();
+    blob.push(0x02);
+    blob.extend_from_slice(&0xFFFF_FFFEu32.to_le_bytes());
+    fmt_changed(decode(&blob));
+
+    let mut blob = 15u32.to_le_bytes().to_vec();
+    blob.extend_from_slice(&[0x02, 0x80, 0x00, 0x00, 0x80]);
+    blob.push(0x10);
+    blob.extend_from_slice(&0xFFFF_FFFEu32.to_le_bytes());
+    fmt_changed(decode(&blob));
+}
+
+#[test]
+fn rejects_unknown_tag() {
+    for tag in [0x00u8, 0x01, 0x0B, 0x12, 0x15, 0x17, 0xFF] {
+        let mut blob = 15u32.to_le_bytes().to_vec();
+        blob.push(tag);
+        fmt_changed(decode(&blob));
+    }
+}
+
+#[test]
+fn rejects_truncated() {
+    for v in [item(), storage_key()] {
+        let blob = encode(&v);
+        for n in 0..blob.len() {
+            fmt_changed(decode(&blob[..n]));
+        }
+    }
+}
+
+#[test]
+fn rejects_view_length_mismatch() {
+    let mut blob = encode(&obj(vec![("b", bytes(&[1, 2, 3, 4]))]));
+    let pos = blob.iter().position(|&b| b == 0x15).unwrap();
+    blob[pos + 1] = 5;
+    fmt_changed(decode(&blob));
+}
+
+#[test]
+fn rejects_view_nonzero_offset_and_wrong_subtag() {
+    let base = encode(&obj(vec![("b", bytes(&[1, 2, 3, 4]))]));
+    let pos = base.iter().position(|&b| b == 0x16).unwrap();
+    let mut off = base.clone();
+    off[pos + 2] = 1;
+    fmt_changed(decode(&off));
+    let mut sub = base.clone();
+    sub[pos + 1] = 0x03;
+    fmt_changed(decode(&sub));
+}
+
+#[test]
+fn rejects_huge_declared_lengths_without_allocating() {
+    let mut blob = 15u32.to_le_bytes().to_vec();
+    blob.extend_from_slice(&[0x02, 0x01, 0x00, 0x00, 0x80, b'b', 0x16, 0x02]);
+    blob.extend_from_slice(&0u64.to_le_bytes());
+    blob.extend_from_slice(&u64::MAX.to_le_bytes());
+    blob.push(0x15);
+    blob.extend_from_slice(&u64::MAX.to_le_bytes());
+    fmt_changed(decode(&blob));
+
+    let mut blob = 15u32.to_le_bytes().to_vec();
+    blob.push(0x10);
+    blob.extend_from_slice(&0x7FFF_FFFFu32.to_le_bytes());
+    fmt_changed(decode(&blob));
+}
+
+#[test]
+fn trailing_bytes_only_if_zero() {
+    let mut blob = encode(&item());
+    blob.extend_from_slice(&[0, 0, 0]);
+    assert_eq!(decode(&blob).unwrap(), item());
+    blob.push(1);
+    fmt_changed(decode(&blob));
+}
+
+#[test]
+fn rejects_excess_depth() {
+    let mut v = obj(vec![]);
+    for _ in 0..4 {
+        v = obj(vec![("a", v)]);
+    }
+    fmt_changed(decode(&encode(&v)));
+    let mut ok = obj(vec![]);
+    for _ in 0..3 {
+        ok = obj(vec![("a", ok)]);
+    }
+    assert!(decode(&encode(&ok)).is_ok());
+}
+
+#[test]
+fn rejects_too_many_properties() {
+    let many = |n: usize| Value::Object((0..n).map(|i| (format!("k{i}"), Value::Null)).collect());
+    assert!(decode(&encode(&many(64))).is_ok());
+    fmt_changed(decode(&encode(&many(65))));
+}
+
+#[test]
+fn rejects_oversized_string_and_bytes() {
+    let ok = obj(vec![("s", s(&"a".repeat(65536)))]);
+    assert!(decode(&encode(&ok)).is_ok());
+    fmt_changed(decode(&encode(&obj(vec![("s", s(&"a".repeat(65537)))]))));
+    fmt_changed(decode(&encode(&obj(vec![("b", bytes(&vec![0; 65537]))]))));
+}
+
+#[test]
+fn rejects_lone_surrogate() {
+    let mut blob = 15u32.to_le_bytes().to_vec();
+    blob.push(0x10);
+    blob.extend_from_slice(&1u32.to_le_bytes());
+    blob.extend_from_slice(&0xD800u16.to_le_bytes());
+    fmt_changed(decode(&blob));
+}
+
+#[test]
+fn debug_output_hides_bytes() {
+    let rendered = format!("{:?}", bytes(&[0xAB; 8]));
+    assert!(!rendered.contains("171"));
+    assert!(!rendered.to_lowercase().contains("ab"));
+}
+
+struct XorShift(u64);
+
+impl XorShift {
+    fn next(&mut self) -> u64 {
+        self.0 ^= self.0 << 13;
+        self.0 ^= self.0 >> 7;
+        self.0 ^= self.0 << 17;
+        self.0
+    }
+}
+
+#[test]
+fn fuzz_truncations_and_mutations_never_panic() {
+    let blobs = [encode(&item()), encode(&storage_key())];
+    for blob in &blobs {
+        for n in 0..=blob.len() {
+            let _ = decode(&blob[..n]);
+        }
+    }
+    let mut rng = XorShift(0x9E37_79B9_7F4A_7C15);
+    for i in 0..10_000 {
+        let mut blob = blobs[i % blobs.len()].clone();
+        let flips = 1 + (rng.next() % 4) as usize;
+        for _ in 0..flips {
+            let at = (rng.next() % blob.len() as u64) as usize;
+            blob[at] = rng.next() as u8;
+        }
+        if rng.next() % 4 == 0 {
+            let keep = (rng.next() % blob.len() as u64) as usize;
+            blob.truncate(keep);
+        }
+        let _ = decode(&blob);
+    }
+}

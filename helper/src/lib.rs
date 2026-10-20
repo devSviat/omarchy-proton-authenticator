@@ -5,4 +5,5 @@ pub mod domain;
 pub mod error;
 pub mod otp;
 pub mod output;
+pub mod ssv;
 pub mod uri;
