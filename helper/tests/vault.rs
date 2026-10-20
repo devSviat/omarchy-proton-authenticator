@@ -542,3 +542,77 @@ fn path_with_uri_special_chars_is_opened() {
     write_vault(&tmp.path().join("a?b#c%d e"), &key_ref(), &[]);
     assert!(vault(tmp.path()).load().is_ok());
 }
+
+#[test]
+fn rejects_view_disguised_as_table() {
+    let tmp = TempDir::new().unwrap();
+    fixture::write_vault_records_as_view(tmp.path(), &key_ref(), &[item(1)]);
+    assert_eq!(
+        vault(tmp.path()).load().unwrap_err(),
+        ErrorCode::VaultFormatChanged
+    );
+}
+
+#[test]
+fn limits_and_defensive_flags_applied() {
+    use rusqlite::config::DbConfig;
+    use rusqlite::limits::Limit;
+    let tmp = TempDir::new().unwrap();
+    write_vault(tmp.path(), &key_ref(), &[]);
+    let source = pa_helper::vault::open_source(&db_path(tmp.path())).unwrap();
+    let memory = pa_helper::vault::open_memory().unwrap();
+    for conn in [&source, &memory] {
+        assert!(conn.db_config(DbConfig::SQLITE_DBCONFIG_DEFENSIVE).unwrap());
+        assert!(!conn
+            .db_config(DbConfig::SQLITE_DBCONFIG_TRUSTED_SCHEMA)
+            .unwrap());
+        assert!(!conn
+            .db_config(DbConfig::SQLITE_DBCONFIG_ENABLE_TRIGGER)
+            .unwrap());
+        assert!(!conn
+            .db_config(DbConfig::SQLITE_DBCONFIG_ENABLE_VIEW)
+            .unwrap());
+        assert_eq!(conn.limit(Limit::SQLITE_LIMIT_LENGTH).unwrap(), 1024 * 1024);
+        assert_eq!(conn.limit(Limit::SQLITE_LIMIT_SQL_LENGTH).unwrap(), 4096);
+        assert_eq!(conn.limit(Limit::SQLITE_LIMIT_ATTACHED).unwrap(), 0);
+        let cell_check: i64 = conn
+            .query_row("PRAGMA cell_size_check", [], |r| r.get(0))
+            .unwrap();
+        let mmap: Option<i64> =
+            rusqlite::OptionalExtension::optional(
+                conn.query_row("PRAGMA mmap_size", [], |r| r.get(0)),
+            )
+            .unwrap();
+        assert_eq!(cell_check, 1);
+        assert!(matches!(mmap, None | Some(0)));
+    }
+}
+
+#[test]
+fn corrupted_pages_are_format_changed() {
+    let tmp = TempDir::new().unwrap();
+    let items: Vec<Value> = (0..20).map(item).collect();
+    write_vault(tmp.path(), &key_ref(), &items);
+    let db = db_path(tmp.path());
+    let mut data = fs::read(&db).unwrap();
+    assert!(data.len() > 4096);
+    data[4096..].fill(0xA5);
+    fs::write(&db, data).unwrap();
+    assert_eq!(
+        vault(tmp.path()).load().unwrap_err(),
+        ErrorCode::VaultFormatChanged
+    );
+}
+
+#[test]
+fn partially_corrupted_db_never_panics() {
+    let tmp = TempDir::new().unwrap();
+    let items: Vec<Value> = (0..20).map(item).collect();
+    write_vault(tmp.path(), &key_ref(), &items);
+    let db = db_path(tmp.path());
+    let mut data = fs::read(&db).unwrap();
+    let mid = data.len() / 2;
+    data[mid..mid + 600].fill(0xA5);
+    fs::write(&db, data).unwrap();
+    let _ = vault(tmp.path()).load();
+}

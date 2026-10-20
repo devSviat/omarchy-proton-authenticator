@@ -8,6 +8,8 @@ use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use rusqlite::backup::{Backup, StepResult};
+use rusqlite::config::DbConfig;
+use rusqlite::limits::Limit;
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use zeroize::Zeroizing;
 
@@ -21,6 +23,8 @@ const MAX_DIR_ENTRIES: usize = 10_000;
 const MAX_ITEMS: usize = 1000;
 const MAX_DB_BYTES: u64 = 16 * 1024 * 1024;
 const SOURCE_CACHE_KIB: i64 = 256;
+const LIMIT_LENGTH_BYTES: i32 = 1024 * 1024;
+const LIMIT_SQL_LENGTH_BYTES: i32 = 4096;
 const BUSY_RETRIES: usize = 3;
 const BUSY_PAUSE: Duration = Duration::from_millis(100);
 
@@ -185,6 +189,13 @@ fn is_busy(err: &rusqlite::Error) -> bool {
     )
 }
 
+fn is_corrupt(err: &rusqlite::Error) -> bool {
+    matches!(
+        err,
+        rusqlite::Error::SqliteFailure(e, _) if e.code == rusqlite::ErrorCode::DatabaseCorrupt
+    )
+}
+
 fn is_cant_open(err: &rusqlite::Error) -> bool {
     matches!(
         err,
@@ -216,9 +227,23 @@ fn percent_encode_path(path: &Path) -> String {
     out
 }
 
+/// Applies SQLite's guidance for untrusted database files before any query.
+pub fn harden(conn: &Connection) -> rusqlite::Result<()> {
+    conn.set_db_config(DbConfig::SQLITE_DBCONFIG_DEFENSIVE, true)?;
+    conn.set_db_config(DbConfig::SQLITE_DBCONFIG_TRUSTED_SCHEMA, false)?;
+    conn.set_db_config(DbConfig::SQLITE_DBCONFIG_ENABLE_TRIGGER, false)?;
+    conn.set_db_config(DbConfig::SQLITE_DBCONFIG_ENABLE_VIEW, false)?;
+    conn.set_limit(Limit::SQLITE_LIMIT_LENGTH, LIMIT_LENGTH_BYTES)?;
+    conn.set_limit(Limit::SQLITE_LIMIT_SQL_LENGTH, LIMIT_SQL_LENGTH_BYTES)?;
+    conn.set_limit(Limit::SQLITE_LIMIT_ATTACHED, 0)?;
+    conn.pragma_update(None, "cell_size_check", true)?;
+    conn.pragma_update(None, "mmap_size", 0)?;
+    register_collation(conn)
+}
+
 // readonly_shm keeps SQLite from creating or writing the -shm file of a WAL
 // database; without a live -shm the open fails instead of touching the dir.
-fn open_source(path: &Path) -> rusqlite::Result<Connection> {
+pub fn open_source(path: &Path) -> rusqlite::Result<Connection> {
     let absolute =
         std::path::absolute(path).map_err(|_| rusqlite::Error::InvalidPath(path.into()))?;
     let uri = format!(
@@ -232,8 +257,15 @@ fn open_source(path: &Path) -> rusqlite::Result<Connection> {
             | OpenFlags::SQLITE_OPEN_NOFOLLOW,
     )?;
     conn.busy_timeout(Duration::ZERO)?;
+    harden(&conn)?;
     conn.pragma_update(None, "cache_size", -SOURCE_CACHE_KIB)?;
-    register_collation(&conn)?;
+    Ok(conn)
+}
+
+pub fn open_memory() -> rusqlite::Result<Connection> {
+    let conn = Connection::open_in_memory()?;
+    harden(&conn)?;
+    conn.pragma_update(None, "temp_store", "MEMORY")?;
     Ok(conn)
 }
 
@@ -247,9 +279,16 @@ fn probe_once(path: &Path, want_snapshot: bool) -> Result<Option<Probe>> {
     match has_required_stores(&source) {
         Ok(true) => {}
         Ok(false) => return Ok(Some(Probe::NoMatch)),
+        Err(e) if is_corrupt(&e) => return Err(ErrorCode::VaultFormatChanged),
         Err(e) if is_busy(&e) => return Ok(None),
         Err(e) if is_cant_open(&e) && wal_path(path).exists() => return Err(ErrorCode::VaultBusy),
         Err(_) => return Ok(Some(Probe::NoMatch)),
+    }
+    match is_table(&source, "Records") {
+        Ok(true) => {}
+        Ok(false) => return Err(ErrorCode::VaultFormatChanged),
+        Err(e) if is_busy(&e) => return Ok(None),
+        Err(_) => return Err(ErrorCode::VaultFormatChanged),
     }
     let size = fs::symlink_metadata(path)
         .map_err(|_| ErrorCode::VaultNotFound)?
@@ -270,9 +309,7 @@ fn probe_once(path: &Path, want_snapshot: bool) -> Result<Option<Probe>> {
 }
 
 fn snapshot(source: &Connection) -> rusqlite::Result<Option<Connection>> {
-    let mut memory = Connection::open_in_memory()?;
-    memory.pragma_update(None, "temp_store", "MEMORY")?;
-    register_collation(&memory)?;
+    let mut memory = open_memory()?;
     let backup = Backup::new(source, &mut memory)?;
     match backup.step(-1)? {
         StepResult::Done => {}
@@ -280,6 +317,9 @@ fn snapshot(source: &Connection) -> rusqlite::Result<Option<Connection>> {
         _ => return Err(rusqlite::Error::InvalidQuery),
     }
     drop(backup);
+    if !quick_check_ok(&memory)? {
+        return Err(rusqlite::Error::InvalidQuery);
+    }
     Ok(Some(memory))
 }
 
@@ -295,6 +335,25 @@ fn probe_with_retry(path: &Path, want_snapshot: bool) -> Result<Probe> {
     Err(ErrorCode::VaultBusy)
 }
 
+fn quick_check_ok(conn: &Connection) -> rusqlite::Result<bool> {
+    let mut stmt = conn.prepare("PRAGMA quick_check")?;
+    let rows = stmt
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows == ["ok"])
+}
+
+fn is_table(conn: &Connection, name: &str) -> rusqlite::Result<bool> {
+    let kind: Option<String> = conn
+        .query_row(
+            "SELECT type FROM sqlite_schema WHERE name = ?1",
+            [name],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(kind.as_deref() == Some("table"))
+}
+
 fn store_id(conn: &Connection, name: &str) -> rusqlite::Result<Option<i64>> {
     conn.query_row(
         "SELECT id FROM ObjectStoreInfo WHERE name = ?1",
@@ -305,6 +364,9 @@ fn store_id(conn: &Connection, name: &str) -> rusqlite::Result<Option<i64>> {
 }
 
 fn has_required_stores(conn: &Connection) -> rusqlite::Result<bool> {
+    if !is_table(conn, "ObjectStoreInfo")? {
+        return Ok(false);
+    }
     Ok(store_id(conn, "items")?.is_some() && store_id(conn, "storageKey")?.is_some())
 }
 

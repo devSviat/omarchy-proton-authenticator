@@ -88,3 +88,14 @@ pub fn write_vault_wal_closed(dir: &Path, key_ref: &Value, items: &[Value]) {
     conn.pragma_update(None, "wal_autocheckpoint", 0).unwrap();
     populate(&conn, key_ref, items);
 }
+
+pub fn write_vault_records_as_view(dir: &Path, key_ref: &Value, items: &[Value]) {
+    std::fs::create_dir_all(dir).unwrap();
+    let conn = open(&db_path(dir));
+    populate(&conn, key_ref, items);
+    conn.execute_batch(
+        "ALTER TABLE Records RENAME TO RealRecords;
+         CREATE VIEW Records AS SELECT * FROM RealRecords;",
+    )
+    .unwrap();
+}
