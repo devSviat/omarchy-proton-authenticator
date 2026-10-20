@@ -5,6 +5,13 @@
 # Nothing here uses sudo; missing packages are named, not installed.
 
 # Sourcing would run this inside the caller's shell, set -e and all.
+# zsh sets no BASH_SOURCE, so the check below cannot see it; keep this first
+# and in syntax both shells parse.
+if [ -n "${ZSH_VERSION:-}" ]; then
+  echo "install.sh: run it with bash, do not source it: ./install.sh" >&2
+  return 1 2>/dev/null || exit 1
+fi
+
 if [[ -n ${BASH_SOURCE[0]:-} && ${BASH_SOURCE[0]} != "$0" ]]; then
   echo "install.sh: run it, do not source it: ./install.sh" >&2
   return 1

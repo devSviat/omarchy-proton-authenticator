@@ -15,7 +15,7 @@ Item {
   property var manifest: null
   property var pluginRegistry: null
 
-  readonly property string pluginDir: Model.pluginDirFromUrl(Qt.resolvedUrl("."))
+  readonly property string pluginDir: Model.pluginDirFromUrl(Qt.resolvedUrl(".")) || ""
 
   // Fake accounts from public RFC seeds; never touches the vault or keyring.
   property bool demo: false
@@ -72,7 +72,7 @@ Item {
 
   HelperClient {
     id: helper
-    helperPath: root.pluginDir + "/bin/pa-helper"
+    helperPath: root.pluginDir === "" ? "" : root.pluginDir + "/bin/pa-helper"
   }
 
   function withDemo(args) {

@@ -9,15 +9,18 @@ var CLEAR_AFTER_MAX = 120
 var CLEAR_AFTER_DEFAULT = 20
 var RECENT_MAX = 5
 
+// Null when the directory cannot be determined, so callers fail closed
+// instead of building paths at the filesystem root.
 function pluginDirFromUrl(url) {
   var u = String(url || "")
   if (u.indexOf("file://") === 0) u = u.slice(7)
   try {
     u = decodeURIComponent(u)
   } catch (e) {
-    return ""
+    return null
   }
-  return u.replace(/\/$/, "")
+  u = u.replace(/\/$/, "")
+  return u.charAt(0) === "/" ? u : null
 }
 
 // Mirrors the helper's item id rule. A leading "-" would be read as a flag.
@@ -138,4 +141,130 @@ var STATUS_TEXT = {
 
 function statusText(status) {
   return STATUS_TEXT[status] || "Proton Authenticator error: " + String(status)
+}
+
+function lower(value) {
+  return value === null || value === undefined ? "" : String(value).toLocaleLowerCase()
+}
+
+function isWordChar(c) {
+  return c.toLowerCase() !== c.toUpperCase() || (c >= "0" && c <= "9")
+}
+
+function isHump(text, i) {
+  var c = text.charAt(i)
+  var prev = text.charAt(i - 1)
+  return c !== c.toLowerCase() && prev === prev.toLowerCase() && prev !== prev.toUpperCase()
+}
+
+function isWordStart(text, i) {
+  return i === 0 || !isWordChar(text.charAt(i - 1)) || isHump(text, i)
+}
+
+// "gh" reaches GitHub through its camel-case humps. Initials never span
+// separate tokens, so "gh" does not reach "Gitea (home)".
+function matchesHumpInitials(text, q) {
+  var initials = ""
+  for (var i = 0; i <= text.length; i++) {
+    var boundary = i === text.length || !isWordChar(text.charAt(i))
+    if (boundary) {
+      if (initials.length >= 2 && initials.indexOf(q) === 0) return true
+      initials = ""
+    } else if (initials === "" || isHump(text, i)) {
+      initials += text.charAt(i).toLocaleLowerCase()
+    }
+  }
+  return false
+}
+
+// 3 = prefix, 2 = start of a word or hump, 1 = subsequence, 0 = no match.
+function fuzzyScore(text, query) {
+  if (text === null || text === undefined) return 0
+  var original = String(text)
+  var t = lower(original)
+  var q = lower(query)
+  if (q === "") return 0
+  if (t.indexOf(q) === 0) return 3
+  var at = t.indexOf(q)
+  while (at > 0) {
+    if (isWordStart(original, at)) return 2
+    at = t.indexOf(q, at + 1)
+  }
+  if (matchesHumpInitials(original, q)) return 2
+  var next = 0
+  for (var i = 0; i < t.length && next < q.length; i++) {
+    if (t.charAt(i) === q.charAt(next)) next++
+  }
+  return next === q.length ? 1 : 0
+}
+
+function compareEntries(a, b) {
+  var keys = ["issuer", "account"]
+  for (var i = 0; i < keys.length; i++) {
+    var x = lower(a[keys[i]])
+    var y = lower(b[keys[i]])
+    if (x < y) return -1
+    if (x > y) return 1
+  }
+  return 0
+}
+
+function defaultOrder(entries, prefs) {
+  var p = normalizePrefs(prefs)
+  var byId = {}
+  entries.forEach(function(e) { byId[e.id] = e })
+  var placed = {}
+  var out = []
+  p.pinned.concat(p.recent).forEach(function(id) {
+    if (byId[id] && !placed[id]) {
+      placed[id] = true
+      out.push(byId[id])
+    }
+  })
+  var rest = entries.filter(function(e) { return !placed[e.id] })
+  rest = rest.map(function(e, i) { return { e: e, i: i } })
+  rest.sort(function(a, b) { return compareEntries(a.e, b.e) || a.i - b.i })
+  return out.concat(rest.map(function(r) { return r.e }))
+}
+
+// Only the issuer can earn a prefix score; the account tops out at a word start.
+function entryScore(entry, query) {
+  return Math.max(fuzzyScore(entry.issuer, query), Math.min(2, fuzzyScore(entry.account, query)))
+}
+
+function filterAndOrder(entries, query, prefs) {
+  var ordered = defaultOrder(Array.isArray(entries) ? entries : [], prefs)
+  if (lower(query).trim() === "") return ordered
+  var q = lower(query).trim()
+  var scored = []
+  ordered.forEach(function(e, i) {
+    var score = entryScore(e, q)
+    if (score > 0) scored.push({ e: e, score: score, i: i })
+  })
+  scored.sort(function(a, b) { return b.score - a.score || a.i - b.i })
+  return scored.map(function(r) { return r.e })
+}
+
+function groupCode(code) {
+  if (code === null || code === undefined) return ""
+  var c = String(code)
+  if (c.length === 6 || c.length === 7) return c.slice(0, 3) + " " + c.slice(3)
+  if (c.length === 8) return c.slice(0, 4) + " " + c.slice(4)
+  return c
+}
+
+function isUrgent(remaining) {
+  return typeof remaining === "number" && remaining <= 5
+}
+
+function ageLabel(nowSec, mtimeSec) {
+  var age = nowSec - mtimeSec
+  if (!(age >= 60)) return "just now"
+  if (age < 3600) return Math.floor(age / 60) + " min ago"
+  if (age < 86400) return Math.floor(age / 3600) + " h ago"
+  return Math.floor(age / 86400) + " d ago"
+}
+
+function isStale(nowSec, mtimeSec, staleHours) {
+  return nowSec - mtimeSec >= staleHours * 3600
 }
