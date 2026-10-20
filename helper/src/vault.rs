@@ -336,7 +336,7 @@ fn probe(path: &Path) -> Result<Probe> {
     let mut items_id = None;
     let mut key_id = None;
     parsed.scan(store_info_root, |rowid, columns| {
-        let [_, Column::Text(name), ..] = columns else {
+        let [Column::Null, Column::Text(name), ..] = columns else {
             return Err(ErrorCode::VaultFormatChanged);
         };
         match *name {
@@ -361,15 +361,29 @@ fn probe(path: &Path) -> Result<Probe> {
 }
 
 fn records(matched: &Matched, store: i64, limit: usize) -> Result<Vec<Zeroizing<Vec<u8>>>> {
+    records_capped(matched, store, limit, MAX_IMAGE_BYTES)
+}
+
+fn records_capped(
+    matched: &Matched,
+    store: i64,
+    limit: usize,
+    max_bytes: usize,
+) -> Result<Vec<Zeroizing<Vec<u8>>>> {
     let parsed = Image::parse(&matched.image)?;
     let mut out = Vec::new();
+    let mut copied = 0usize;
     parsed.scan(matched.records_root, |_, columns| {
-        let [Column::Int(store_id), Column::Text(_) | Column::Blob(_), Column::Blob(value), ..] =
+        let [Column::Int(store_id), Column::Text(_) | Column::Blob(_), Column::Blob(value), Column::Null, ..] =
             columns
         else {
             return Err(ErrorCode::VaultFormatChanged);
         };
         if *store_id == store && out.len() < limit {
+            copied = copied
+                .checked_add(value.len())
+                .filter(|&n| n <= max_bytes)
+                .ok_or(ErrorCode::VaultFormatChanged)?;
             out.push(Zeroizing::new(value.to_vec()));
         }
         Ok(())
@@ -440,4 +454,36 @@ fn read_items(matched: &Matched) -> Result<Vec<EncryptedItem>> {
             })
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SCHEMA: &str = "
+        CREATE TABLE Records (objectStoreID INTEGER NOT NULL, key TEXT NOT NULL, value NOT NULL, recordID INTEGER PRIMARY KEY);
+        CREATE TABLE ObjectStoreInfo (id INTEGER PRIMARY KEY, name TEXT NOT NULL, keyPath BLOB NOT NULL, autoInc INTEGER NOT NULL);
+        INSERT INTO ObjectStoreInfo VALUES (1, 'items', x'', 0), (2, 'storageKey', x'', 0);
+        INSERT INTO Records (objectStoreID, key, value) VALUES
+            (1, 'a', zeroblob(800)), (1, 'b', zeroblob(800)), (2, 'k', zeroblob(10));
+    ";
+
+    #[test]
+    fn copied_bytes_are_capped() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let path = tmp.path().join(DB_FILE_NAME);
+        rusqlite::Connection::open(&path)
+            .unwrap()
+            .execute_batch(SCHEMA)
+            .unwrap();
+        let Probe::Match(matched) = probe(&path).unwrap() else {
+            panic!("fixture must match");
+        };
+        assert_eq!(records_capped(&matched, 1, 10, 1600).unwrap().len(), 2);
+        assert_eq!(
+            records_capped(&matched, 1, 10, 1599).unwrap_err(),
+            ErrorCode::VaultFormatChanged
+        );
+        assert_eq!(records_capped(&matched, 2, 10, 10).unwrap().len(), 1);
+    }
 }

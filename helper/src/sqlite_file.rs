@@ -185,6 +185,14 @@ impl Payload<'_> {
     }
 }
 
+struct CellInfo {
+    start: usize,
+    body: usize,
+    end: usize,
+    total: usize,
+    key: u64,
+}
+
 impl<'a> Image<'a> {
     pub fn parse(data: &'a [u8]) -> Result<Self> {
         if data.len() < HEADER_LEN || !data.starts_with(MAGIC) {
@@ -224,26 +232,38 @@ impl<'a> Image<'a> {
             .ok_or(ErrorCode::VaultFormatChanged)
     }
 
-    fn payload(&self, cell: &'a [u8], total: usize, visited: &mut [bool]) -> Result<Payload<'a>> {
-        let local = local_payload_size(total, self.usable);
-        if local == total {
-            return cell
-                .get(..total)
-                .map(Payload::Local)
-                .ok_or(ErrorCode::VaultFormatChanged);
+    fn payload(
+        &self,
+        page: &'a [u8],
+        cell: &CellInfo,
+        visited: &mut [bool],
+    ) -> Result<Payload<'a>> {
+        let local = local_payload_size(cell.total, self.usable);
+        let local_bytes = page
+            .get(cell.body..cell.body + local)
+            .ok_or(ErrorCode::VaultFormatChanged)?;
+        if local == cell.total {
+            return Ok(Payload::Local(local_bytes));
         }
-        let mut out = Zeroizing::new(Vec::with_capacity(total));
-        out.extend_from_slice(cell.get(..local).ok_or(ErrorCode::VaultFormatChanged)?);
-        let mut next = be32(cell, local)? as usize;
-        while out.len() < total {
+        let mut out = Zeroizing::new(Vec::with_capacity(cell.total));
+        out.extend_from_slice(local_bytes);
+        let mut next = be32(page, cell.body + local)? as usize;
+        while out.len() < cell.total {
             if next < 2 || next > self.page_count || visited[next] {
                 return bad();
             }
             visited[next] = true;
-            let page = self.page(next)?;
-            let take = (total - out.len()).min(self.usable - 4);
-            out.extend_from_slice(page.get(4..4 + take).ok_or(ErrorCode::VaultFormatChanged)?);
-            next = be32(page, 0)? as usize;
+            let overflow = self.page(next)?;
+            let take = (cell.total - out.len()).min(self.usable - 4);
+            out.extend_from_slice(
+                overflow
+                    .get(4..4 + take)
+                    .ok_or(ErrorCode::VaultFormatChanged)?,
+            );
+            next = be32(overflow, 0)? as usize;
+        }
+        if next != 0 {
+            return bad();
         }
         Ok(Payload::Assembled(out))
     }
@@ -264,33 +284,19 @@ impl<'a> Image<'a> {
             let page = self.page(number)?;
             let header = if number == 1 { HEADER_LEN } else { 0 };
             let kind = *page.get(header).ok_or(ErrorCode::VaultFormatChanged)?;
-            let cell_count = be16(page, header + 3)?;
             match kind {
                 TABLE_LEAF => {
-                    let array = header + 8;
-                    self.check_array(array, cell_count)?;
-                    for i in 0..cell_count {
-                        let cell = self.cell(page, array, i)?;
-                        let (total, a) = varint(cell)?;
-                        let (rowid, b) = varint(&cell[a..])?;
-                        let total = usize::try_from(total)
-                            .ok()
-                            .filter(|&t| t <= MAX_PAYLOAD)
-                            .ok_or(ErrorCode::VaultFormatChanged)?;
-                        let payload = self.payload(&cell[a + b..], total, &mut visited)?;
+                    for cell in self.cells(page, header, false)? {
+                        let payload = self.payload(page, &cell, &mut visited)?;
                         let columns = parse_record(payload.bytes())?;
-                        f(rowid as i64, &columns)?;
+                        f(cell.key as i64, &columns)?;
                     }
                 }
                 TABLE_INTERIOR => {
-                    let array = header + 12;
-                    self.check_array(array, cell_count)?;
-                    let mut children = Vec::with_capacity(cell_count + 1);
-                    for i in 0..cell_count {
-                        let cell = self.cell(page, array, i)?;
-                        let child = be32(cell, 0)? as usize;
-                        varint(cell.get(4..).ok_or(ErrorCode::VaultFormatChanged)?)?;
-                        children.push(child);
+                    let cells = self.cells(page, header, true)?;
+                    let mut children = Vec::with_capacity(cells.len() + 1);
+                    for cell in &cells {
+                        children.push(be32(page, cell.start)? as usize);
                     }
                     children.push(be32(page, header + 8)? as usize);
                     for child in children.into_iter().rev() {
@@ -306,21 +312,69 @@ impl<'a> Image<'a> {
         Ok(())
     }
 
-    fn check_array(&self, array: usize, cell_count: usize) -> Result<()> {
-        match cell_count.checked_mul(2).and_then(|n| n.checked_add(array)) {
-            Some(end) if end <= self.usable => Ok(()),
-            _ => bad(),
-        }
-    }
-
-    fn cell(&self, page: &'a [u8], array: usize, index: usize) -> Result<&'a [u8]> {
-        let pointer = be16(page, array + 2 * index)?;
-        let min = array + 2 * (index + 1);
-        if pointer < min || pointer >= self.usable {
+    /// Locates every cell of a table b-tree page. Cells must sit inside the cell
+    /// content area and must not overlap, so a page cannot present one payload
+    /// many times.
+    fn cells(&self, page: &'a [u8], header: usize, interior: bool) -> Result<Vec<CellInfo>> {
+        let count = be16(page, header + 3)?;
+        let array = header + if interior { 12 } else { 8 };
+        let array_end = count
+            .checked_mul(2)
+            .and_then(|n| n.checked_add(array))
+            .filter(|&end| end <= self.usable)
+            .ok_or(ErrorCode::VaultFormatChanged)?;
+        let content_start = match be16(page, header + 5)? {
+            0 => 65536,
+            n => n,
+        };
+        if count > 0 && (content_start < array_end || content_start > self.usable) {
             return bad();
         }
-        page.get(pointer..self.usable)
-            .ok_or(ErrorCode::VaultFormatChanged)
+        let mut cells = Vec::with_capacity(count);
+        for i in 0..count {
+            let start = be16(page, array + 2 * i)?;
+            if start < content_start || start >= self.usable {
+                return bad();
+            }
+            let area = &page[start..self.usable];
+            let cell = if interior {
+                let (key, len) = varint(area.get(4..).ok_or(ErrorCode::VaultFormatChanged)?)?;
+                CellInfo {
+                    start,
+                    body: start + 4 + len,
+                    end: start + 4 + len,
+                    total: 0,
+                    key,
+                }
+            } else {
+                let (total, a) = varint(area)?;
+                let (key, b) = varint(&area[a..])?;
+                let total = usize::try_from(total)
+                    .ok()
+                    .filter(|&t| t <= MAX_PAYLOAD)
+                    .ok_or(ErrorCode::VaultFormatChanged)?;
+                let local = local_payload_size(total, self.usable);
+                let pointer = if local < total { 4 } else { 0 };
+                let body = start + a + b;
+                CellInfo {
+                    start,
+                    body,
+                    end: body + local + pointer,
+                    total,
+                    key,
+                }
+            };
+            if cell.end > self.usable {
+                return bad();
+            }
+            cells.push(cell);
+        }
+        let mut extents: Vec<(usize, usize)> = cells.iter().map(|c| (c.start, c.end)).collect();
+        extents.sort_unstable();
+        if extents.windows(2).any(|w| w[0].1 > w[1].0) {
+            return bad();
+        }
+        Ok(cells)
     }
 
     /// Root page of the `sqlite_schema` entry with `type == "table"` and this name.
@@ -506,6 +560,7 @@ mod tests {
             let at = offset + 8 + 2 * i;
             page[at..at + 2].copy_from_slice(&(end as u16).to_be_bytes());
         }
+        page[offset + 5..offset + 7].copy_from_slice(&(end as u16).to_be_bytes());
     }
 
     fn interior(page: &mut [u8], children: &[u32], right: u32) {
@@ -519,6 +574,8 @@ mod tests {
             let at = 12 + 2 * i;
             page[at..at + 2].copy_from_slice(&(end as u16).to_be_bytes());
         }
+        let content = PS - children.len() * 5;
+        page[5..7].copy_from_slice(&(content as u16).to_be_bytes());
     }
 
     fn schema_cell(root: u8) -> Vec<u8> {
@@ -661,5 +718,107 @@ mod tests {
         leaf(&mut p2, 0, &[row_cell(1, "a")]);
         p2[3..5].copy_from_slice(&0xFFFFu16.to_be_bytes());
         assert!(rows(&image(vec![p2]), 2).is_err());
+    }
+
+    fn two_cell_page() -> Vec<u8> {
+        let mut p = vec![0u8; PS];
+        leaf(&mut p, 0, &[row_cell(1, "aaaa"), row_cell(2, "bbbb")]);
+        p
+    }
+
+    fn pointer(page: &mut [u8], index: usize, value: u16) {
+        page[8 + 2 * index..10 + 2 * index].copy_from_slice(&value.to_be_bytes());
+    }
+
+    fn read_pointer(page: &[u8], index: usize) -> u16 {
+        u16::from_be_bytes([page[8 + 2 * index], page[9 + 2 * index]])
+    }
+
+    #[test]
+    fn overlapping_cells_are_rejected() {
+        assert!(rows(&image(vec![two_cell_page()]), 2).is_ok());
+
+        let mut p = two_cell_page();
+        let first = read_pointer(&p, 0);
+        pointer(&mut p, 1, first);
+        assert_eq!(
+            rows(&image(vec![p]), 2).unwrap_err(),
+            ErrorCode::VaultFormatChanged
+        );
+
+        let mut p = two_cell_page();
+        let second = read_pointer(&p, 1);
+        pointer(&mut p, 1, second + 1);
+        assert_eq!(
+            rows(&image(vec![p]), 2).unwrap_err(),
+            ErrorCode::VaultFormatChanged
+        );
+    }
+
+    #[test]
+    fn pointer_into_pointer_array_is_rejected() {
+        let mut p = two_cell_page();
+        pointer(&mut p, 0, 10);
+        p[5..7].copy_from_slice(&10u16.to_be_bytes());
+        assert_eq!(
+            rows(&image(vec![p]), 2).unwrap_err(),
+            ErrorCode::VaultFormatChanged
+        );
+
+        let mut p = two_cell_page();
+        pointer(&mut p, 0, 10);
+        assert_eq!(
+            rows(&image(vec![p]), 2).unwrap_err(),
+            ErrorCode::VaultFormatChanged
+        );
+    }
+
+    #[test]
+    fn pointer_before_content_area_or_cell_past_usable_is_rejected() {
+        let mut p = two_cell_page();
+        let second = read_pointer(&p, 1);
+        p[5..7].copy_from_slice(&(second + 1).to_be_bytes());
+        assert!(rows(&image(vec![p]), 2).is_err());
+
+        let mut p = two_cell_page();
+        p[5..7].copy_from_slice(&0u16.to_be_bytes());
+        assert!(rows(&image(vec![p]), 2).is_err());
+
+        let mut p = two_cell_page();
+        pointer(&mut p, 0, (PS - 2) as u16);
+        assert!(rows(&image(vec![p]), 2).is_err());
+    }
+
+    fn overflow_row(next: u32) -> Vec<u8> {
+        let text = "x".repeat(597);
+        let rec = record(&[13 + 2 * text.len() as u64], text.as_bytes());
+        assert_eq!(rec.len(), 600);
+        let local = local_payload_size(rec.len(), PS);
+        assert_eq!(local + PS - 4, rec.len());
+        let cell = [
+            varint_bytes(rec.len() as u64),
+            vec![1],
+            rec[..local].to_vec(),
+            3u32.to_be_bytes().to_vec(),
+        ]
+        .concat();
+        let mut p2 = vec![0u8; PS];
+        leaf(&mut p2, 0, &[cell]);
+        let mut p3 = vec![0u8; PS];
+        p3[..4].copy_from_slice(&next.to_be_bytes());
+        p3[4..].copy_from_slice(&rec[local..]);
+        let mut p4 = vec![0u8; PS];
+        leaf(&mut p4, 0, &[]);
+        image(vec![p2, p3, p4])
+    }
+
+    #[test]
+    fn overflow_chain_must_end_with_zero() {
+        let rows_ok = rows(&overflow_row(0), 2).unwrap();
+        assert_eq!(rows_ok, vec![(1, "x".repeat(597))]);
+        assert_eq!(
+            rows(&overflow_row(4), 2).unwrap_err(),
+            ErrorCode::VaultFormatChanged
+        );
     }
 }

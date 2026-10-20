@@ -301,3 +301,44 @@ fn ten_thousand_mutations_never_panic() {
     }
     assert!(ours(&image).is_ok());
 }
+
+#[test]
+fn fragmented_pages_after_random_updates_and_deletes() {
+    for page_size in [512u32, 4096] {
+        let tmp = TempDir::new().unwrap();
+        let conn = fresh_db(tmp.path(), page_size);
+        let mut state = 0x9E37_79B9u64 + u64::from(page_size);
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        for i in 0..600u64 {
+            let len = (next() % 900) as usize;
+            fixture::insert_raw(&conn, "items", format!("k{i}").as_bytes(), &blob_of(i, len));
+            match next() % 4 {
+                0 => {
+                    conn.execute(
+                        "DELETE FROM Records WHERE recordID = ?1",
+                        [1 + (next() % (i + 1)) as i64],
+                    )
+                    .unwrap();
+                }
+                1 => {
+                    conn.execute(
+                        "UPDATE Records SET value = ?1 WHERE recordID = ?2",
+                        rusqlite::params![
+                            blob_of(next(), (next() % 1500) as usize),
+                            1 + (next() % (i + 1)) as i64
+                        ],
+                    )
+                    .unwrap();
+                }
+                _ => {}
+            }
+        }
+        drop(conn);
+        assert_file_matches_sqlite(&db_path(tmp.path()));
+    }
+}

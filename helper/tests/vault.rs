@@ -547,3 +547,106 @@ fn broken_newer_candidate_does_not_fall_back_to_older() {
         ErrorCode::VaultFormatChanged
     );
 }
+
+fn write_custom_schema_vault(dir: &Path, schema: &str) {
+    use rusqlite::params;
+    use support::ssv_writer::encode;
+    fs::create_dir_all(dir).unwrap();
+    let conn = fixture::open(&db_path(dir));
+    conn.execute_batch(schema).unwrap();
+    conn.execute(
+        "INSERT INTO ObjectStoreInfo (id, name, keyPath, autoInc) VALUES (1, 'items', x'', 0), (2, 'storageKey', x'', 0)",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO Records (objectStoreID, key, value, recordID) VALUES (2, 'storageKey', ?1, 1), (1, 'item-0', ?2, 2)",
+        params![encode(&key_ref()), encode(&item(0))],
+    )
+    .unwrap();
+}
+
+#[test]
+fn object_store_id_must_be_rowid_alias() {
+    let tmp = TempDir::new().unwrap();
+    write_custom_schema_vault(
+        tmp.path(),
+        "CREATE TABLE Records (objectStoreID INTEGER NOT NULL, key TEXT NOT NULL, value NOT NULL, recordID INTEGER PRIMARY KEY);
+         CREATE TABLE ObjectStoreInfo (id INTEGER NOT NULL, name TEXT NOT NULL, keyPath BLOB NOT NULL, autoInc INTEGER NOT NULL);",
+    );
+    assert_eq!(
+        vault(tmp.path()).load().unwrap_err(),
+        ErrorCode::VaultFormatChanged
+    );
+}
+
+#[test]
+fn record_id_must_be_rowid_alias() {
+    let tmp = TempDir::new().unwrap();
+    write_custom_schema_vault(
+        tmp.path(),
+        "CREATE TABLE Records (objectStoreID INTEGER NOT NULL, key TEXT NOT NULL, value NOT NULL, recordID INTEGER);
+         CREATE TABLE ObjectStoreInfo (id INTEGER PRIMARY KEY, name TEXT NOT NULL, keyPath BLOB NOT NULL, autoInc INTEGER NOT NULL);",
+    );
+    assert_eq!(
+        vault(tmp.path()).load().unwrap_err(),
+        ErrorCode::VaultFormatChanged
+    );
+}
+
+#[test]
+fn many_pointers_to_one_large_payload_are_rejected_without_copying() {
+    use pa_helper::sqlite_file::Image;
+    use support::ssv_writer::encode;
+
+    const PAGE: usize = 65536;
+    let tmp = TempDir::new().unwrap();
+    let db = db_path(tmp.path());
+    {
+        let conn = fixture::open(&db);
+        conn.pragma_update(None, "page_size", PAGE as u32).unwrap();
+        fixture::create_schema(&conn, &["items", "storageKey"]);
+        fixture::insert_raw(&conn, "storageKey", b"storageKey", &encode(&key_ref()));
+        let big = obj(vec![
+            ("id", s("item-0")),
+            ("issuer", s("GitHub")),
+            ("name", s("me@example.com")),
+            ("order", Value::Int(0)),
+            ("__encryptedData", bytes(&[9; 60_000])),
+        ]);
+        fixture::insert_raw(&conn, "items", b"item-0", &encode(&big));
+    }
+    assert!(vault(tmp.path()).load().is_ok());
+
+    let mut data = fs::read(&db).unwrap();
+    let root = Image::parse(&data)
+        .unwrap()
+        .table_root("Records")
+        .unwrap()
+        .unwrap() as usize;
+    let page = &mut data[(root - 1) * PAGE..root * PAGE];
+    assert_eq!(page[0], 0x0D);
+    assert_eq!(u16::from_be_bytes([page[3], page[4]]), 2);
+    let big_cell = [page[10], page[11]];
+    assert!(usize::from(u16::from_be_bytes(big_cell)) > 8 + 2 * 1001);
+    page[3..5].copy_from_slice(&1001u16.to_be_bytes());
+    for i in 1..1001 {
+        page[8 + 2 * i..10 + 2 * i].copy_from_slice(&big_cell);
+    }
+    fs::write(&db, &data).unwrap();
+
+    let mut rows_seen = 0;
+    let scanned = Image::parse(&data).unwrap().scan(root as u32, |_, _| {
+        rows_seen += 1;
+        Ok(())
+    });
+    assert_eq!(scanned.unwrap_err(), ErrorCode::VaultFormatChanged);
+    assert_eq!(rows_seen, 0);
+
+    let started = std::time::Instant::now();
+    assert_eq!(
+        vault(tmp.path()).load().unwrap_err(),
+        ErrorCode::VaultFormatChanged
+    );
+    assert!(started.elapsed() < Duration::from_secs(2));
+}
