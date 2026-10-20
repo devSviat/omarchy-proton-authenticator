@@ -34,3 +34,7 @@ strip = true
 [dev-dependencies]
 rusqlite = { version = "0.40.2", features = ["collation"] }
 tempfile = "3.27.0"
+
+[[test]]
+name = "hardening"
+harness = false
