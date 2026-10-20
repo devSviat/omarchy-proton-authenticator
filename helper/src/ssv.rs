@@ -8,7 +8,7 @@ use crate::error::{ErrorCode, Result};
 const SUPPORTED_VERSION: u32 = 15;
 const MAX_DEPTH: usize = 4;
 const MAX_PROPERTIES: usize = 64;
-const MAX_STRING_UNITS: usize = 64 * 1024;
+const MAX_STRING_BYTES: usize = 64 * 1024;
 const MAX_BYTES: usize = 64 * 1024;
 
 const TAG_OBJECT: u8 = 0x02;
@@ -28,7 +28,10 @@ const TAG_ARRAY_BUFFER_VIEW: u8 = 0x16;
 const SUBTAG_UINT8_ARRAY: u8 = 0x02;
 const TERMINATOR: u32 = 0xFFFF_FFFF;
 const EIGHT_BIT_FLAG: u32 = 0x8000_0000;
+const POOL_REF: u32 = 0xFFFF_FFFE;
 
+/// Subset of JS values that can appear in a Proton Authenticator vault record.
+/// `Debug` never prints string or byte contents.
 #[derive(PartialEq)]
 pub enum Value {
     Undefined,
@@ -56,6 +59,7 @@ impl fmt::Debug for Value {
     }
 }
 
+/// Looks up a property of an `Object`; `None` if missing or `obj` is not an object.
 pub fn get<'a>(obj: &'a Value, key: &str) -> Option<&'a Value> {
     match obj {
         Value::Object(props) => props.iter().find(|(k, _)| k == key).map(|(_, v)| v),
@@ -63,11 +67,14 @@ pub fn get<'a>(obj: &'a Value, key: &str) -> Option<&'a Value> {
     }
 }
 
+/// Decodes a WebKit SerializedScriptValue blob (version 15, strict subset).
+/// Any unexpected or truncated input fails with `VaultFormatChanged`.
 pub fn decode(blob: &[u8]) -> Result<Value> {
     let mut r = Reader {
         buf: blob,
         pos: 0,
         properties: 0,
+        pool: Vec::new(),
     };
     if r.u32()? != SUPPORTED_VERSION {
         return Err(ErrorCode::VaultFormatChanged);
@@ -83,6 +90,7 @@ struct Reader<'a> {
     buf: &'a [u8],
     pos: usize,
     properties: usize,
+    pool: Vec<String>,
 }
 
 fn bad<T>() -> Result<T> {
@@ -165,34 +173,56 @@ impl<'a> Reader<'a> {
             }
             let name = self.string_body(head)?;
             let value = self.value(depth + 1)?;
+            if props.iter().any(|(k, _)| *k == name) {
+                return bad();
+            }
             props.push((name, value));
         }
     }
 
     fn string_body(&mut self, head: u32) -> Result<String> {
-        if head == 0xFFFF_FFFE {
-            return bad();
+        if head == POOL_REF {
+            return self.pool_ref();
         }
-        if head & EIGHT_BIT_FLAG != 0 {
+        let decoded = if head & EIGHT_BIT_FLAG != 0 {
             let len = (head & !EIGHT_BIT_FLAG) as usize;
-            if len > MAX_STRING_UNITS {
+            if len > MAX_STRING_BYTES {
                 return bad();
             }
-            Ok(self.take(len)?.iter().map(|&b| char::from(b)).collect())
+            self.take(len)?.iter().map(|&b| char::from(b)).collect()
         } else {
-            let units = head as usize;
-            if units > MAX_STRING_UNITS {
+            let byte_len = (head as usize)
+                .checked_mul(2)
+                .ok_or(ErrorCode::VaultFormatChanged)?;
+            if byte_len > MAX_STRING_BYTES {
                 return bad();
             }
-            let byte_len = units.checked_mul(2).ok_or(ErrorCode::VaultFormatChanged)?;
             let raw = self.take(byte_len)?;
-            let decoded = char::decode_utf16(
-                raw.chunks_exact(2)
-                    .map(|c| u16::from_le_bytes([c[0], c[1]])),
-            )
-            .collect::<std::result::Result<String, _>>();
-            decoded.or_else(|_| bad())
+            let units = raw
+                .chunks_exact(2)
+                .map(|c| u16::from_le_bytes([c[0], c[1]]));
+            match char::decode_utf16(units).collect::<std::result::Result<String, _>>() {
+                Ok(s) => s,
+                Err(_) => return bad(),
+            }
+        };
+        if !decoded.is_empty() {
+            self.pool.push(decoded.clone());
         }
+        Ok(decoded)
+    }
+
+    fn pool_ref(&mut self) -> Result<String> {
+        let index = match self.pool.len() {
+            0..=0xFF => u64::from(self.u8()?),
+            0x100..=0xFFFF => u64::from(u16::from_le_bytes(self.array()?)),
+            _ => u64::from(self.u32()?),
+        };
+        usize::try_from(index)
+            .ok()
+            .and_then(|i| self.pool.get(i))
+            .cloned()
+            .ok_or(ErrorCode::VaultFormatChanged)
     }
 
     fn view(&mut self) -> Result<Value> {

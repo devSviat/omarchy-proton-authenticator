@@ -2,7 +2,7 @@ mod support;
 
 use pa_helper::error::ErrorCode;
 use pa_helper::ssv::{decode, get, Value};
-use support::ssv_writer::{encode, encode_with_version, write_string_body};
+use support::ssv_writer::{encode, encode_with_version, write_raw_string_body};
 use zeroize::Zeroizing;
 
 fn bytes(b: &[u8]) -> Value {
@@ -81,7 +81,7 @@ fn utf16_string() {
     let v = obj(vec![("issuer", s("Привіт"))]);
     let blob = encode(&v);
     let mut utf16_marker = Vec::new();
-    write_string_body(&mut utf16_marker, "Привіт");
+    write_raw_string_body(&mut utf16_marker, "Привіт");
     assert_eq!(utf16_marker[3] & 0x80, 0);
     assert_eq!(decode(&blob).unwrap(), v);
 }
@@ -93,17 +93,75 @@ fn rejects_unknown_version() {
 }
 
 #[test]
-fn rejects_string_pool_ref() {
+fn pool_ref_for_repeated_name_and_value() {
+    let v = obj(vec![
+        ("id", s("k")),
+        ("issuer", s("same")),
+        ("name", s("same")),
+        ("adapterKeyId", s("k")),
+        ("id2", s("id")),
+    ]);
+    let blob = encode(&v);
+    assert!(blob.windows(4).any(|w| w == 0xFFFF_FFFEu32.to_le_bytes()));
+    assert_eq!(decode(&blob).unwrap(), v);
+}
+
+#[test]
+fn pool_ref_wire_layout() {
+    let mut blob = 15u32.to_le_bytes().to_vec();
+    blob.push(0x02);
+    blob.extend_from_slice(&[0x01, 0x00, 0x00, 0x80, b'a']);
+    blob.extend_from_slice(&[0x10, 0x01, 0x00, 0x00, 0x80, b'x']);
+    blob.extend_from_slice(&[0xFE, 0xFF, 0xFF, 0xFF, 0x01]);
+    blob.push(0x10);
+    blob.extend_from_slice(&[0xFE, 0xFF, 0xFF, 0xFF, 0x00]);
+    blob.extend_from_slice(&[0xFF; 4]);
+    assert_eq!(
+        decode(&blob).unwrap(),
+        obj(vec![("a", s("x")), ("x", s("a"))])
+    );
+}
+
+#[test]
+fn rejects_pool_ref_out_of_range() {
     let mut blob = 15u32.to_le_bytes().to_vec();
     blob.push(0x02);
     blob.extend_from_slice(&0xFFFF_FFFEu32.to_le_bytes());
+    blob.push(0);
     fmt_changed(decode(&blob));
 
     let mut blob = 15u32.to_le_bytes().to_vec();
-    blob.extend_from_slice(&[0x02, 0x80, 0x00, 0x00, 0x80]);
+    blob.extend_from_slice(&[0x02, 0x01, 0x00, 0x00, 0x80, b'a', 0x10]);
+    blob.extend_from_slice(&0xFFFF_FFFEu32.to_le_bytes());
+    blob.push(5);
+    fmt_changed(decode(&blob));
+
+    let mut blob = 15u32.to_le_bytes().to_vec();
     blob.push(0x10);
     blob.extend_from_slice(&0xFFFF_FFFEu32.to_le_bytes());
     fmt_changed(decode(&blob));
+}
+
+#[test]
+fn empty_strings_are_not_pooled() {
+    let mut blob = 15u32.to_le_bytes().to_vec();
+    blob.push(0x02);
+    blob.extend_from_slice(&[0x00, 0x00, 0x00, 0x80]);
+    blob.push(0x11);
+    blob.extend_from_slice(&[0x01, 0x00, 0x00, 0x80, b'a', 0x10]);
+    blob.extend_from_slice(&0xFFFF_FFFEu32.to_le_bytes());
+    blob.push(0);
+    blob.extend_from_slice(&[0xFF; 4]);
+    assert_eq!(
+        decode(&blob).unwrap(),
+        obj(vec![("", s("")), ("a", s("a"))])
+    );
+}
+
+#[test]
+fn rejects_duplicate_property_names() {
+    let v = obj(vec![("a", Value::Null), ("a", Value::Null)]);
+    fmt_changed(decode(&encode(&v)));
 }
 
 #[test]
@@ -192,10 +250,19 @@ fn rejects_too_many_properties() {
 }
 
 #[test]
-fn rejects_oversized_string_and_bytes() {
+fn string_limit_is_64_kib_of_input_bytes() {
     let ok = obj(vec![("s", s(&"a".repeat(65536)))]);
     assert!(decode(&encode(&ok)).is_ok());
     fmt_changed(decode(&encode(&obj(vec![("s", s(&"a".repeat(65537)))]))));
+    let ok16 = obj(vec![("s", s(&"Я".repeat(32768)))]);
+    assert!(decode(&encode(&ok16)).is_ok());
+    let big16 = obj(vec![("s", s(&"Ж\u{0416}".repeat(16385)))]);
+    fmt_changed(decode(&encode(&big16)));
+}
+
+#[test]
+fn rejects_oversized_bytes() {
+    assert!(decode(&encode(&obj(vec![("b", bytes(&vec![0; 65536]))]))).is_ok());
     fmt_changed(decode(&encode(&obj(vec![("b", bytes(&vec![0; 65537]))]))));
 }
 
@@ -209,10 +276,10 @@ fn rejects_lone_surrogate() {
 }
 
 #[test]
-fn debug_output_hides_bytes() {
-    let rendered = format!("{:?}", bytes(&[0xAB; 8]));
-    assert!(!rendered.contains("171"));
-    assert!(!rendered.to_lowercase().contains("ab"));
+fn debug_output_is_redacted() {
+    assert_eq!(format!("{:?}", bytes(&[0xAB; 8])), "Bytes(len=8)");
+    assert_eq!(format!("{:?}", s("secret")), "String(..)");
+    assert_eq!(format!("{:?}", obj(vec![("k", s("v"))])), "Object(props=1)");
 }
 
 struct XorShift(u64);
