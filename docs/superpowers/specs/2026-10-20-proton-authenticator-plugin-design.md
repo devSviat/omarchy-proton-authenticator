@@ -1,283 +1,256 @@
-# Proton Authenticator для Omarchy — дизайн
+# Proton Authenticator for Omarchy — Design
 
-Дата: 2026-10-20 · Автор: devSviat · Статус: погоджено 2026-10-20
+Date: 2026-10-20 · Author: devSviat · Status: approved 2026-10-20, updated with decisions taken during implementation
 
-## Навіщо
+## Why
 
-Офіційний Proton Authenticator (`proton-authenticator-bin` 1.1.6, Tauri/WebKitGTK) на Linux повільний і підвисає. Щоб узяти 2FA-код, доводиться відкривати важке вікно. Потрібен швидкий доступ до кодів прямо з бару Omarchy: хоткей → кілька літер → Enter → код у буфері.
+The official Proton Authenticator desktop app (Tauri/WebKitGTK, 1.1.6 at the time of writing) can feel slow on Linux, and fetching a 2FA code means opening a full window. This plugin gives fast access to the codes from the Omarchy bar: hotkey → type a few letters → Enter → the code is on the clipboard.
 
-Існуючі плагіни (zeus-deus, mapski, navjottomer) користувач свідомо не використовує, бо не довіряє авторам, а тут ідеться про 2FA-секрети. Тому пріоритети такі: **безпека → надійність → UX → UI**.
+Priorities, in order: **security → reliability → UX → UI**.
 
-Плагін буде опублікований у каталозі plugins.omarchy.org.
+The plugin will be published in the plugins.omarchy.org catalog.
 
-## Цілі
+### Relation to other plugins
 
-- Панель у барі Omarchy зі списком акаунтів і поточними TOTP-кодами, яка відкривається миттєво.
-- Робота повністю з клавіатури: пошук одразу при наборі, Enter копіює код.
-- Джерело даних — локальний сейф офіційного Proton Authenticator, **тільки на читання**. Синхронізацію з телефоном робить офіційна програма.
-- Нові акаунти з'являються в плагіні автоматично, щойно офіційна програма оновила сейф.
-- Секрети ніколи не потрапляють у QML, на диск, в argv/env, логи, сповіщення чи історію буфера.
+The Omarchy plugin catalog already lists several community plugins for Proton Authenticator. This project is an independent implementation, not a fork or a reaction to them. The author has not audited those projects and makes no claims about their quality or security. A separate implementation simply lets every line that touches 2FA secrets be designed, tested and reviewed against a single, explicit threat model, which is the main point of this plugin.
 
-## Не-цілі
+## Goals
 
-- Додавання, редагування й видалення акаунтів. Акаунти користувач додає з телефону (там є камера), а решту робить в офіційній програмі.
-- Власна мережева синхронізація з Proton. Плагін не ходить у мережу.
-- Захист від шкідливої програми, що працює від імені того ж користувача. Вона й так може прочитати сейф і ключ із Secret Service, де немає ACL на рівні програм. Мета — **не додати нових каналів витоку**, а не перестрибнути цю межу.
-- Інші джерела кодів (Proton Pass, Aegis, імпорт файлів). Офіційний `pass-cli` працює лише з Proton Pass і сейфу Authenticator не бачить.
+- A bar panel that lists accounts with their current TOTP codes and opens instantly.
+- Fully keyboard-driven: type-to-search, Enter copies the code.
+- The data source is the official Proton Authenticator local vault, **read-only**. Syncing with other devices remains the job of the official app.
+- New accounts appear in the plugin automatically once the official app has updated the vault.
+- Secrets never reach QML, disk, argv/env, logs, notifications or clipboard history.
 
-## Анти-цілі (провал, навіть якщо «працює»)
+## Non-goals
 
-- Будь-який TOTP-секрет або ключ сейфу на диску, у swap, у core dump, в аргументах процесу, у змінних оточення, логах, сповіщеннях чи історії буфера.
-- Будь-які мережеві виклики з плагіна або helper-а.
-- Завантаження готових бінарників, `curl | bash`, `sudo`, підміна чи патчинг офіційної програми (як у zeus-deus).
-- Будь-який запис у сейф Proton.
-- Мовчазний збій або показ сміття, коли формат сейфу змінився.
-- Повільна панель. Якщо вона відкривається не миттєво, плагін втрачає сенс.
+- Adding, editing or deleting accounts. Accounts are added on the phone (it has the camera); everything else happens in the official app.
+- Network sync with Proton. The plugin never touches the network.
+- Protection against malware running as the same user. Such a process can already read the vault and its key from the Secret Service, which has no per-application access control. The goal is to **add no new leak channels**, not to defend beyond that boundary.
+- Other code sources (Proton Pass, Aegis, file imports). The official `pass-cli` only works with Proton Pass and cannot see the Authenticator vault.
 
-## Контекст і факти
+## Anti-goals (failure even if it "works")
 
-- **Омарчі:** 4.0.6, Quickshell-шел `omarchy-shell`. Документація плагінів лежить у `/usr/share/omarchy/shell/README.md`, `/usr/share/omarchy/shell/plugins/README.md` і `/usr/share/omarchy/shell/plugins/bar/README.md`. Схема маніфесту — `/usr/share/omarchy/shell/services/PluginRegistry.qml`, валідатор — `omarchy-plugin-validate`, UI-кіт — `/usr/share/omarchy/shell/Ui/`.
-- **Обмеження Omarchy:**
-  - Плагіни працюють без пісочниці всередині шелу.
-  - Візуальні віджети ділять спільний QML-граф, тому чутливий стан має лишатися поза досяжним графом.
-  - Симлінки всередині теки плагіна заборонені.
-  - Маніфест не реєструє хоткеї.
-- **Еталон стилю коду й структури** — власний плагін користувача `~/Projects/omarchy-nightlight` (`sviat.nightlight`):
-  - `Service.qml` — синглтон, що володіє станом і процесами;
-  - `Panel.qml` отримує його через `bar?.shell?.serviceFor("<id>")` і використовує `manageIpc: false`;
-  - `indicators/*.qml` — тільки візуальна частина;
-  - `bin/` — CLI.
-- **Сейф Proton Authenticator** лежить у `~/.local/share/me.proton.authenticator/databases/indexeddb/v1/tauri_localhost_0/<hash>/IndexedDB.sqlite3`. Це WebKit IndexedDB у SQLite з об'єктними сховищами `items` і `storageKey`.
-  - 32-байтний кореневий ключ зберігається в Secret Service: service `com.proton.authenticator`, username `adapter::0::<id>`.
-  - Ключ сховища виводиться через HKDF-SHA256 (info `authenticator;storage-key`, salt із `storageKey`).
-  - Кожен запис зашифрований AES-256-GCM з AAD `authenticator;item` і після розшифрування є JSON із `secret`, `uri`, `period`, `digits` тощо.
-  - Обгортка зберігання недокументована. Її розібрано в плагіні mapski (MIT, `github.com/mapski/omarchy.proton.auth.git-plugin`, `bin/protonauth_list.py`), і це довідка про **формат**, код звідти не копіюємо.
-  - Офіційний код шифрування записів і генерації кодів: `github.com/protonpass/proton-pass-common`, крейт `proton-authenticator`. Це **GPL-3.0**, тож код **не копіюємо**, а використовуємо як специфікацію.
-  - Офіційного CLI чи API в Authenticator немає.
-- **Машина розробника:**
-  - На диску є swap-файл (31 ГБ) і `systemd-coredump`.
-  - `ptrace_scope=1`.
-  - `python3` у PATH вказує на mise, тому на PATH не покладаємося.
-  - Rust установлено через rustup (`~/.cargo`, rustc 1.99.1).
-  - Є `wl-clipboard` 2.3.0 з підтримкою `--sensitive`, і історія буфера Omarchy (`plugins/clipboard/capture.sh`) пропускає такий вміст.
-- **Зайняті хоткеї:** `Super+Shift+A` (ChatGPT), `Super+Ctrl+A`, `Super+Ctrl+Shift+A` і `Super+Shift+Alt+A`. Обрано **`Super+Alt+A`**: він вільний.
+- Any TOTP seed or vault key on disk, in swap, in a core dump, in process arguments, in environment variables, in logs, in notifications or in clipboard history.
+- Any network access from the plugin or its helper.
+- Downloading prebuilt binaries, `curl | bash`, `sudo`, or replacing/patching the official app.
+- Any write to the Proton vault or its directory.
+- Silent failure or garbage output when the vault format changes.
+- A slow panel. If it does not open instantly the plugin has no reason to exist.
 
-## Архітектура
+## Context and facts
 
-Плагін складається з двох частин:
+- **Omarchy** 4.0.6, Quickshell-based `omarchy-shell`. Plugin docs: `/usr/share/omarchy/shell/README.md`, `/usr/share/omarchy/shell/plugins/README.md`, `/usr/share/omarchy/shell/plugins/bar/README.md`. Manifest schema: `/usr/share/omarchy/shell/services/PluginRegistry.qml`. Validator: `omarchy-plugin-validate`. UI kit: `/usr/share/omarchy/shell/Ui/`.
+- **Omarchy constraints:**
+  - plugins run unsandboxed inside the shell;
+  - visual widgets share one QML scene graph, so sensitive state must stay outside the reachable graph;
+  - symlinks inside a plugin directory are rejected;
+  - the manifest cannot register hotkeys.
+- **Code-structure reference:** the author's `sviat.nightlight` plugin (github.com/devSviat/omarchy-nightlight):
+  - `Service.qml` is a singleton that owns state and processes;
+  - `Panel.qml` gets it via `bar?.shell?.serviceFor("<id>")` and uses `manageIpc: false`;
+  - `indicators/*.qml` are visual only.
+- **Proton Authenticator vault:** `~/.local/share/me.proton.authenticator/databases/indexeddb/v1/tauri_localhost_0/<hash>/IndexedDB.sqlite3`. It is a WebKit IndexedDB stored in SQLite (WAL mode) with the object stores `items` and `storageKey`.
+  - The 32-byte root key lives in the Secret Service: service `com.proton.authenticator`, username = the record's `adapterKeyId` (or `id` for pre-1.1.4 layouts).
+  - Storage key = HKDF-SHA256(root key, salt from `storageKey`, info `authenticator;storage-key`).
+  - Each item is AES-256-GCM encrypted (12-byte IV prefix, AAD `authenticator;item`). The plaintext is JSON with `entryType` (`Totp`/`Steam`), `secret`, `uri`, `period`, etc.
+  - Key sources: 0 = OS keyring (supported), 1 = app password (reported as `APP_LOCKED`), 2 = fallback key stored in the database (refused as `UNSAFE_KEY_STORAGE`).
+  - Source of truth for this format: Proton's open-source WebClients code (`applications/authenticator/src/lib/storage-key`, `db/entities`, `crypto.ts`, `src-tauri/src/storage_key.rs`) and `protonpass/proton-pass-common` (GPL-3.0). These are used as a **specification only**; no code is copied.
+  - The app has no official CLI or API.
+- **Clipboard:** `wl-clipboard` ≥ 2.3 supports `--sensitive`, and Omarchy's clipboard history (`plugins/clipboard/capture.sh`) skips such content.
+- **Recommended hotkey:** `Super+Alt+A`. It was free on the author's system; the README tells users to check their own bindings.
 
-1. **QML-плагін (`sviat.proton-authenticator`)**, kinds `service` + `bar-widget`:
-   - `Service.qml` володіє станом, запускає helper і стежить за файлом сейфу;
-   - `Panel.qml` — панель, що випадає з бару;
-   - `indicators/` — іконка в барі.
-2. **Helper (`pa-helper`, Rust)** — короткоживучий процес. Він розшифровує сейф, рахує коди й копіює їх у буфер. Збирається з вихідного коду в теку плагіна, а QML викликає його **за абсолютним шляхом у теці плагіна**, ніколи через PATH.
+## Architecture
 
-Межа довіри: **TOTP-секрети й ключі існують тільки всередині helper-а** і лише на час одного виклику. QML отримує лише ідентифікатори, мітки (issuer/account) і поточні коди.
+The plugin has two parts:
 
-### Helper: команди (протокол)
+1. **QML plugin (`sviat.proton-authenticator`)**, kinds `service` + `bar-widget`:
+   - `Service.qml` owns state, runs the helper and polls vault status;
+   - `Panel.qml` is the panel that drops from the bar;
+   - `indicators/` is the bar icon.
+2. **Helper (`pa-helper`, Rust)**, a short-lived process. It reads and decrypts the vault, computes codes and puts a code on the clipboard. It is built from source into the plugin directory, and QML calls it **by absolute path inside the plugin directory**, never through `PATH`.
 
-Рішення моє: конкретний формат на розсуд реалізації, але з такими властивостями. Вивід — один обмежений за розміром JSON у stdout. Помилки повертаються машиночитаними кодами, без тексту, що містить дані.
+Trust boundary: **TOTP seeds and keys exist only inside the helper**, and only for one invocation. QML only ever receives ids, labels (issuer/account) and current codes.
 
-- `check` — стан без розшифрування: чи знайдено сейф, чи доступний і розблокований keyring, чи на місці залежності (`wl-copy`, `secret-tool`), mtime сейфу. Використовується іконкою в барі.
-- `codes` — для кожного запису повертає `id`, `issuer`, `account`, `code`, `next_code`, `period`, `digits` і час до зміни коду. Секретів у виводі немає за побудовою: тип виводу не має поля для секрету.
-- `copy <id>` — helper **сам** рахує актуальний код (якщо до зміни лишилося менше ~5 с, то наступний) і передає його у `/usr/bin/wl-copy --sensitive` через stdin. Після цього він запускає відокремлений процес очищення. Той тримає **лише хеш** коду, через N секунд читає буфер і, якщо хеш збігається, очищає його. Сам код у процесі очищення не зберігається.
-- Коди помилок щонайменше такі: `VAULT_NOT_FOUND`, `KEYRING_LOCKED`, `KEY_NOT_FOUND`, `VAULT_FORMAT_CHANGED`, `DECRYPT_FAILED`, `DEPENDENCY_MISSING`, `ITEM_NOT_FOUND`.
+### Helper protocol
 
-### Helper: вимоги безпеки (обов'язкові)
+Each command prints exactly one JSON line, bounded in size, in an envelope `{"ok":…,"protocol":1,…}`. Errors carry only a machine-readable code, never data.
 
-- **Пам'ять:**
-  - на старті `prctl(PR_SET_DUMPABLE, 0)`, щоб не було core dump і ptrace від сусідів;
-  - `mlockall(MCL_CURRENT|MCL_FUTURE)`, щоб нічого не потрапило у swap. Якщо `mlockall` не вдається через ліміт `RLIMIT_MEMLOCK`, допустимо прицільно викликати `mlock` для буферів із секретами. Мовчки продовжувати без жодного з цих двох захистів не можна;
-  - усі ключі й секрети тримаються в типах із `zeroize`/`Zeroizing` і затираються одразу після використання.
-- **Паніки:** `panic = "abort"` у release, а повідомлення про помилки ніколи не містять даних сейфу.
-- **Диск:**
-  - нуль записів: ні тимчасових файлів, ні логів;
-  - сейф відкривається лише на читання (SQLite `mode=ro`, бажано backup API у in-memory базу, щоб не тримати блокування й не зачіпати WAL офіційної програми).
-- **Мережа:** жодного мережевого коду і жодних мережевих залежностей.
-- **Ключ з keyring:** отримується через `/usr/bin/secret-tool lookup …` за абсолютним шляхом, а значення читається з pipe. Рішення моє: так ми уникаємо важкого D-Bus-стеку (`zbus`). Альтернативу можна обговорити, якщо вона дасть менше залежностей.
-- **Заблокований keyring** (рішення моє). `secret-tool lookup` на заблокованому keyring не повертає помилку, а відкриває вікно розблокування, а після autologin keyring заблокований до першого розблокування. Тому:
-  - `check` визначає стан колекції через D-Bus властивість `Locked` (`/usr/bin/gdbus` або `busctl` за абсолютним шляхом, без `zbus`) і **ніколи** не викликає вікно розблокування;
-  - якщо keyring заблокований, панель показує стан «Keyring заблоковано» з кнопкою «Розблокувати». Вікно розблокування з'являється лише після явного натискання цієї кнопки.
-- **Оточення:**
-  - дочірні процеси (`secret-tool`, `wl-copy`) запускаються за абсолютними шляхами з мінімальним оточенням: тільки `WAYLAND_DISPLAY`, `XDG_RUNTIME_DIR`, `DBUS_SESSION_BUS_ADDRESS` і подібні необхідні змінні;
-  - секрети ніколи не передаються через argv чи env.
-- **Вхідні дані:** `id` валідується за суворим шаблоном, розмір вхідних даних і виводу обмежений, а helper сам завершується через таймаут (кілька секунд).
-- **Залежності:** мінімальні, лише RustCrypto (`aes-gcm`, `hkdf`, `hmac`, `sha1`, `sha2`, `zeroize`), SQLite і JSON-серіалізація.
-  - Для SQLite перевага — системна `libsqlite3` замість `bundled`, рішення моє.
-  - `Cargo.lock` комітиться, збірка тільки з `--locked`.
-  - Ніякого `pyotp`-подібного стороннього TOTP: TOTP і HOTP пишемо самі за RFC 6238/4226.
-- **Алгоритми:**
-  - SHA1, SHA256 і SHA512, 6–8 цифр, довільний `period`;
-  - Steam-коди (5 символів, алфавіт Steam), якщо такі є в сейфі. Перевірити на реальних даних, чи вони трапляються;
-  - непідтримувані записи (HOTP тощо) показуються як «не підтримується», а не ламають увесь список.
+- `version` → helper version and protocol number.
+- `check [--demo]` → `status` (`READY` or an error code) and `vaultMtime`, without decrypting anything and without ever opening a keyring prompt. It also verifies that `wl-copy` and `secret-tool` are available.
+- `codes [--only <id>] [--allow-prompt] [--demo]` → `now` and `entries` (`id`, `issuer`, `account`, `kind`, `code`, `nextCode`, `period`, `digits`, `remaining`). The output type has no field that could hold a secret.
+- `copy <id> [--clear-after <5..120>] [--demo]` → the helper computes the code itself (the next one if fewer than 5 s remain), hands it to `wl-copy --foreground --sensitive --type text/plain` via stdin, replies, detaches, and keeps `wl-copy` alive until the deadline. If `wl-copy` is still the clipboard owner at the deadline, the helper kills it and runs `wl-copy --clear`. If the user copied something else in the meantime, `wl-copy` has already exited and nothing is cleared. No copy or hash of the code is kept.
+- `prefs get` / `prefs set` → pinned and recent ids plus the privacy flag (see "Stored state").
+- Error codes include `VAULT_NOT_FOUND`, `VAULT_BUSY`, `VAULT_FORMAT_CHANGED`, `KEYRING_LOCKED`, `KEYRING_UNAVAILABLE`, `KEY_NOT_FOUND`, `DECRYPT_FAILED`, `APP_LOCKED`, `UNSAFE_KEY_STORAGE`, `DEPENDENCY_MISSING`, `ITEM_NOT_FOUND`, `INVALID_ARGUMENT`, `MEMLOCK_FAILED`, `TIMEOUT`, `OUTPUT_TOO_LARGE`, `INTERNAL`.
 
-### QML: вимоги безпеки
+### Helper security requirements
 
-- QML ніколи не отримує й не зберігає секрети.
-- Коди тримаються в моделі тільки поки панель відкрита. Коли панель закривається, модель очищається, і helper більше не викликається.
-- Ніяких `console.log` з даними. Ніяких сповіщень із назвами акаунтів.
-- Копіювання робить helper (`copy <id>`), тож QML сам не запускає `wl-copy` з кодом.
-- Режим приватності (Ctrl+H): видно лише код вибраного рядка. Бажано, щоб приховані коди взагалі не потрапляли в QML (наприклад, `codes --only <id>`). Деталі вирішує реалізація.
+- **Process hardening, first thing in `main`:**
+  - `prctl(PR_SET_DUMPABLE, 0)`, so there are no core dumps and no ptrace from peers;
+  - `RLIMIT_CORE = 0`;
+  - `mlockall(MCL_CURRENT | MCL_FUTURE | MCL_ONFAULT)`. If it fails, the helper exits with `MEMLOCK_FAILED` (fail closed).
+  - The whole helper must fit a typical 8 MiB `RLIMIT_MEMLOCK`. This is verified by a test with a maximum-size vault.
+- **Memory hygiene:** keys, seeds and decrypted plaintext live in `Zeroizing` types, and the crypto crates are built with their `zeroize` features. Residual stack copies inside crypto libraries are documented. The real protection is the process hardening above.
+- **Panics:** `panic = "abort"` in release builds. Error output never contains vault data.
+- **No SQLite in the shipped helper.** Even read-only opens of a WAL database can create or modify `-wal`/`-shm` files next to the vault, so the helper reads the files itself:
+  - the main file and `-wal` are opened with `O_NOFOLLOW`, size-capped and checked for stability before and after reading; `-shm` is ignored;
+  - committed WAL frames are applied per the documented WAL format (salts and checksums, last valid commit), streamed in two passes;
+  - the resulting in-memory image is parsed by a strict, read-only, safe-Rust B-tree reader limited to what the vault needs;
+  - any unexpected structure gives `VAULT_FORMAT_CHANGED`.
+  - SQLite is used only in tests, as a reference oracle.
+- **WebKit value decoding:** a strict decoder for the subset of WebKit's SerializedScriptValue format the vault uses, with bounded allocation, failing closed.
+- **No network:** no network code and no network crates.
+- **Keyring access:**
+  - the lock state is read via `/usr/bin/gdbus` (Secret Service `SearchItems`), which never prompts;
+  - the root key is read via `/usr/bin/secret-tool lookup` into a zeroizing buffer;
+  - the unlock prompt appears only when the user explicitly presses "Unlock" (`codes --allow-prompt`), and that call gets a longer time budget (120 s) so the password can be typed.
+- **Child processes:** absolute paths, a scrubbed environment (`HOME`, `XDG_RUNTIME_DIR`, `WAYLAND_DISPLAY`, `DBUS_SESSION_BUS_ADDRESS` only), their own process group, bounded output, hard timeouts and whole-group kill. Secrets never go through argv or env.
+- **Inputs:** ids validated against `^[A-Za-z0-9._:-]{1,128}$`, flag-like values rejected, all sizes bounded, a global watchdog (10 s; 120 s for the explicit unlock).
+- **Dependencies:** minimal (RustCrypto `aes-gcm`, `hkdf`, `hmac`, `sha1`, `sha2`, plus `zeroize`, `serde`/`serde_json` and `libc`). `Cargo.lock` is committed, builds use `--locked`, and `cargo deny` runs in CI. TOTP/HOTP/Steam are implemented in-house per RFC 6238/4226.
+- **Algorithms:** SHA1/SHA256/SHA512, 6–8 digits, any period from 1 to 86400 s, and Steam codes. Unsupported entries (e.g. HOTP) are shown as unsupported instead of breaking the list.
 
-## Архітектура проєкту
+### QML security requirements
 
-Користувач окремо вимагає правильної архітектури й патернів, особливо для helper-а.
+- QML never receives or stores secrets.
+- Codes stay in the model only while the panel is open. Closing the panel clears the model and stops helper calls.
+- No `console.log` of data and no notifications with account names.
+- Copying is done by the helper (`copy <id>`). QML never runs `wl-copy` with a code.
+- Privacy mode (Ctrl+H): only the selected row shows its code, and hidden codes are never loaded into QML (`codes --only <id>`).
 
-### Структура репозиторію
+## Project architecture
+
+### Repository layout
 
 ```
-manifest.json            # маніфест Omarchy
-Service.qml              # стан і процеси (синглтон, як у nightlight)
-Panel.qml                # тільки відображення
-components/              # QML-компоненти панелі (рядок, поле пошуку, футер, порожні стани)
-indicators/              # іконка в барі, лише візуал
-helper/                  # Rust-крейт pa-helper
+manifest.json            # Omarchy manifest
+Service.qml              # state and processes (singleton)
+Panel.qml                # rendering only
+components/              # panel components (row, search field, footer, empty states)
+indicators/              # bar icon, visual only
+helper/                  # Rust crate pa-helper
 install.sh
 README.md, LICENSE, preview.png
-docs/                    # специфікації, план, модель загроз
-.github/workflows/ci.yml # fmt, clippy, test, cargo-deny / cargo-audit
+docs/                    # specs, plan
+.github/workflows/ci.yml # fmt, clippy, test, cargo deny, memlock budget test
 ```
 
-### Helper: шари й патерни
+### Helper layers and patterns
 
-Принцип **functional core / imperative shell** плюс **ports & adapters**: чиста логіка без I/O у центрі, весь ввід і вивід за трейтами на краях.
+**Functional core / imperative shell** with **ports & adapters**: pure logic without I/O in the middle, all I/O behind traits at the edges.
 
-- `main.rs` — тонка точка входу. Спершу виконує hardening, потім розбирає аргументи, викликає один use-case і відображає `ErrorCode` в JSON та код виходу. Ніякої логіки.
-- `hardening` — `PR_SET_DUMPABLE`, `RLIMIT_CORE=0`, `mlockall`. **Єдиний модуль з `unsafe`.** Скрізь інде `#![forbid(unsafe_code)]` (або `deny` з винятком лише для цього модуля).
-- `cli` — розбір команд вручну, без `clap`, заради мінімуму залежностей. Сувора валідація.
-- `app` (use-cases) — `check`, `codes`, `copy`. Це оркестрація, яка залежить від трейтів, а не від конкретних реалізацій.
+- `main.rs`: a thin entry point. Hardening, then argument parsing, then one use-case, then one JSON line and an exit code.
+- `sys`: the **only module allowed to contain `unsafe`** (prctl, rlimits, mlockall, setsid, dup2, kill). Every block carries a SAFETY comment; the rest of the crate denies `unsafe_code`.
+- `cli`: hand-written strict argument parsing, no `clap`.
+- `app`: the use-cases (`check`, `codes`, `copy`) and the `KeyProvider` port.
 - `domain`:
-  - `Secret` — newtype над `Zeroizing<Vec<u8>>`. **Без `Serialize`, `Clone` і `Display`, з `Debug`, що друкує `[REDACTED]`.** Так компілятор не дасть вивести секрет.
-  - `Entry` — issuer, account, параметри OTP і `Secret`.
-  - `EntryView` — DTO для виводу, **поля для секрету в ньому немає** за побудовою.
-- `otp` — чисті функції TOTP, HOTP і Steam без I/O, повністю покриті тестами.
-- `vault` — порт `VaultSource`. Адаптер `ProtonIdbVault`: пошук файлу, read-only знімок SQLite, суворий декодер WebKit IDB, розшифрування записів. Декодер ізольований, тож при зміні формату правиться одне місце.
-- `crypto` — HKDF і AES-GCM, усе в `Zeroizing`-типах.
-- `keyring` — порт `KeyProvider`. Адаптер `SecretToolKeyProvider` (`/usr/bin/secret-tool`), а в тестах фейк.
-- `clipboard` — порт `Clipboard`. Адаптер `WlCopy`, а також процес очищення, що тримає лише хеш коду.
-- `error` — enum `ErrorCode` без вкладених даних, у вивід іде лише код.
+  - `Secret` (no `Serialize`/`Clone`/`Display`; `Debug` prints `[REDACTED]`);
+  - `Entry`;
+  - `EntryView`, which has no secret field by construction.
+- `otp`, `base32`, `uri`: pure functions, fully tested against RFC vectors.
+- `vault`, `wal`, `sqlite_file`, `ssv`: vault file access, WAL application, the B-tree reader and the WebKit value decoder.
+- `crypto`: HKDF and AES-GCM.
+- `keyring`, `proc`: Secret Service access through bounded child processes.
+- `clipboard`: the `Clipboard` port and the `WlCopy` holder.
+- `prefs`: the small state file.
+- `error`: `ErrorCode` without payloads.
 
-Інші вимоги до helper-а:
-- Одна бібліотека (`lib.rs`) і тонкий бінарник, щоб усе тестувалося без запуску процесу.
-- Integration-тести на синтетичному сейфі з фейковим `KeyProvider`.
-- `clippy` з `-D warnings` (плюс pedantic, де доречно), `rustfmt`, `cargo deny`/`cargo audit` у CI, `--locked`.
+### QML layers
 
-### QML: шари
+- **`Service.qml`**: the single source of truth and an explicit state machine (`Loading → Ready | Error(code)`). It is the only place that runs the helper, through one `HelperClient` wrapper that owns the absolute path, timeouts, size limits, JSON parsing and error mapping.
+- **`Panel.qml` and `components/`**: rendering and keyboard navigation only.
+- **`indicators/`**: renders the `check` status only.
 
-- **`Service.qml`** — єдине джерело правди і явна машина станів `Idle → Loading → Ready | Error(code)`.
-  - Тільки він запускає helper, через одну обгортку `HelperClient`. Обгортка відповідає за абсолютний шлях, таймаут, обмеження розміру, розбір JSON і мапінг помилок.
-  - Він же стежить за файлом сейфу й зберігає налаштування та стан.
-- **`Panel.qml` і `components/`** — лише відображення і клавіатурна навігація. Вони читають стан сервісу й викликають його методи, процесів не запускають.
-- **`indicators/`** — тільки візуальне відображення стану з `check`.
+## Development and review process
 
-## Процес розробки і ревʼю
+- Every implementation task gets a code review and a security review before the next task starts.
+- Before the `dev → main` PR and before publishing, a full repository security audit plus the manual checks under "Testing" are performed.
+- New dependencies need a justification and a `cargo deny` pass.
 
-Це вимога користувача: **кожен шматок коду проходить ревʼю коду та безпеки.**
+## Sync and data refresh
 
-- Після кожної задачі плану виконується code review (коректність, архітектура, стиль) і окремий security review диффу. Знахідки виправляються до переходу до наступної задачі.
-- Перед PR `dev → main` і перед публікацією в каталог робиться повний security-аудит усього репозиторію, а також ручні перевірки з розділу «Тестування».
-- Нові залежності додаються тільки з обґрунтуванням у PR і тільки після перевірки (`cargo deny`, походження, кількість транзитивних залежностей).
+- While the panel is open the service polls `check` every 5 s (every 60 s while closed). A changed `vaultMtime` triggers a reload, so new accounts appear automatically whenever the official app has synced.
+- While the panel is open `codes` is requested **once per period boundary**, not every second. Countdown rings tick locally.
+- The footer shows "Updated N ago" (the vault's last local change, worded honestly).
+- If the vault has not changed for longer than a threshold (setting, default 24 h), a subtle "Not synced for …" hint with a Sync button appears.
+- **Sync** starts `/usr/bin/proton-authenticator`. The plugin picks up the change once the app has written the vault. Whether the app can start in the tray without a window is checked during implementation.
+- The official app is **not** started automatically when the panel opens: it is slow and takes focus.
+- On `VAULT_FORMAT_CHANGED` the panel shows a clear message and an "Open Proton" button, never partial data.
 
-## Синхронізація й оновлення даних
+## UX and UI
 
-- Плагін стежить за файлом сейфу та його `-wal`. Коли вони змінилися, а панель відкрита, він перезапитує `codes`. Так нові акаунти з'являються самі, якщо офіційна програма десь запущена.
-- Поки панель відкрита, `codes` викликається **один раз на межі періоду**, а не щосекунди. Таймер відлічується локально.
-- У футері панелі показано «Оновлено N тому». Це mtime сейфу, тобто час останньої локальної зміни, а не обов'язково синхронізації. Формулювання має бути чесним.
-- Якщо сейф не змінювався довше за поріг (налаштування, за замовчуванням 24 год), з'являється ненав'язлива підказка «Давно не синхронізовано» з кнопкою.
-- Кнопка **«Синхронізувати»** запускає `/usr/bin/proton-authenticator` (через `Quickshell.execDetached`). Коли він оновить сейф, плагін це підхопить.
-  - **Відкрите питання для реалізації:** чи вміє програма запускатися у фоні або в треї без вікна. Бінарник містить Tauri tray-плагін. Якщо вміє, кнопка запускає тихо, якщо ні — відкривається вікно.
-- Офіційна програма **не запускається автоматично** при відкритті панелі: вона повільна й краде фокус.
-- Коли формат сейфу не розпізнано (`VAULT_FORMAT_CHANGED`), панель показує зрозуміле повідомлення й кнопку «Відкрити Proton», без часткових даних.
+Layout **A, a list under the bar**, was chosen.
 
-## UX і UI
+- **Opening:** a click on the bar icon or `Super+Alt+A` (`omarchy-shell shell toggle sviat.proton-authenticator`). Focus goes straight to the search field.
+- **Row:** issuer initial, issuer, account (elided), the code in a large monospace font (grouped, e.g. `482 913`) and a countdown ring. The code and ring turn red in the last 5 s.
+- **Next code:** shown only on the selected row, only in the last 5 s.
+- **Search:** fuzzy over issuer and account (`gh` → GitHub). Order: pinned, then recently used, then alphabetical.
+- **Keys** (every action on Ctrl, so typing never triggers one):
+  - `Enter` copies;
+  - `↑↓` or `Ctrl+J/K` move the selection, and `PgUp/PgDn` move faster;
+  - `Esc` clears the search first, then closes the panel;
+  - `Ctrl+P` pins or unpins;
+  - `Ctrl+H` toggles privacy mode (remembered).
+- **After copying:** a brief "Copied ✓" in the row, then the panel closes (configurable). The clipboard is cleared after 20 s (configurable).
+- **Bar icon:** status only (ready, keyring locked, vault missing, format changed, dependencies missing), from `check`, with no decryption.
+- **Style:** colors and fonts from the current Omarchy theme via the standard UI kit, with no hard-coded colors.
+- **Empty and error states:** no accounts; keyring locked (with Unlock); Proton Authenticator not found; format changed; app lock on; unsafe key storage; helper missing or outdated (with the exact install command).
+- **Demo mode** with fake accounts (public RFC test seeds), for screenshots and UI work. It never touches the vault or the keyring.
+- **UI copy:** English.
 
-Вибрано варіант **A — список під баром** (макет: `.superpowers/brainstorm/…/content/layout.html`).
+### Settings (`barWidget.schema`)
 
-- **Відкриття:** клік по іконці в барі або `Super+Alt+A` (`omarchy-shell shell toggle sviat.proton-authenticator`). Фокус одразу в полі пошуку.
-- **Рядок списку:** ініціал або іконка issuer-а, назва issuer-а, account (обрізаний), код великим моноширинним шрифтом (групами `482 913`), кільце-таймер. Останні 5 с код і кільце червоні.
-- **Наступний код** показується тільки у вибраному рядку і тільки в останні 5 с періоду.
-- **Пошук:** нечіткий, по issuer і account (`gh` → GitHub). Порядок: закріплені, потім нещодавно використані, потім за алфавітом.
-- **Клавіші** (всі дії на Ctrl, щоб набір тексту нічого не запускав):
-  - `Enter` — копіювати;
-  - `↑↓` або `Ctrl+J/K` — навігація, `PgUp/PgDn` — швидка навігація;
-  - `Esc` — спершу очищає пошук, потім закриває панель;
-  - `Ctrl+P` — закріпити або відкріпити;
-  - `Ctrl+H` — режим приватності (запам'ятовується).
-- **Після копіювання:** у рядку на мить з'являється «Скопійовано ✓», панель закривається (налаштовується), буфер очищається через 20 с (налаштовується).
-- **Іконка в барі:** показує тільки стан (ok, keyring заблоковано, сейфу немає, формат змінився, бракує залежностей) через `check`, без розшифрування.
-- **Футер:** «Оновлено N тому · Синхронізувати» і підказка `↵ копіювати`.
-- **Стиль:** кольори й шрифти з поточної теми Omarchy через стандартний `Style`/UI-кіт, без власних хардкод-кольорів. Тестувати на темі Abstract Black.
-- **Порожні стани і помилки:** «Немає акаунтів» з кнопкою «Відкрити Proton», «Keyring заблоковано» з поясненням, як розблокувати, «Proton Authenticator не встановлено».
-- **Демо-режим** із вигаданими акаунтами (RFC-тестові секрети), без доступу до keyring — для скріншота `preview.png` і розробки UI.
-
-### Налаштування (`barWidget.schema`)
-
-| Ключ | Тип | За замовчуванням |
+| Key | Type | Default |
 |---|---|---|
-| Очищення буфера, с | integer 5–120 | 20 |
-| Закривати після копіювання | boolean | true |
-| Поріг «давно не синхронізовано», год | integer | 24 |
+| `clearClipboardSeconds` | integer 5–120 | 20 |
+| `closeOnCopy` | boolean | true |
+| `staleHours` | integer 1–168 | 24 |
 
-Налаштування мінімальні. Решту додамо за потреби.
+### Stored state
 
-### Збережений стан
+Pinned and recently used accounts are stored as **ids only** (no labels) in `$XDG_STATE_HOME/sviat.proton-authenticator/prefs.json`, together with the privacy flag:
+- the directory is 0700 and the file 0600;
+- writes are atomic (exclusive temp file, fsync, rename);
+- reads use `O_NOFOLLOW`.
 
-Закріплені й нещодавно використані акаунти зберігаються лише як **id** (без назв) у `~/.local/state/sviat.proton-authenticator/prefs.json`:
-- тека має права 0700, файл 0600;
-- запис атомарний;
-- файл відкривається з `O_NOFOLLOW`.
+## Installation and publishing
 
-Режим приватності зберігається там само.
-
-## Встановлення й публікація
-
-- **Репозиторій:** `github.com/devSviat/omarchy-proton-authenticator`, **публічний від початку**, ліцензія MIT (як у nightlight). Код із GPL-проєктів не копіюємо. Перший коміт (документ, LICENSE, `.gitignore`) іде в `main` з дозволу користувача, далі відгалужується `dev`.
-- **Блокування програми (PIN/пароль Proton Authenticator).** У користувача воно вимкнене. Для інших користувачів (рішення моє):
-  - README чесно пише, що плагін читає сейф напряму й обходить це блокування;
-  - якщо увімкнене блокування додає шар шифрування і helper не може розшифрувати сейф, він повертає окремий код `APP_LOCKED` (коли це можна розпізнати) або `VAULT_FORMAT_CHANGED`, а панель пояснює, що робити;
-  - підтримку PIN у плагіні можна додати пізніше, якщо буде запит.
-- **Git-процес:** розробка в `dev` (або feature → `dev`), у `main` тільки через PR, коміти від імені користувача без згадок асистента.
-- **Маніфест:** `id` `sviat.proton-authenticator`, `name` "Proton Authenticator", `author` "devSviat", `kinds` `["service","bar-widget"]`.
+- **Repository:** `github.com/devSviat/omarchy-proton-authenticator`, public, MIT license. No code is copied from GPL projects. Development happens on `dev`; `main` only changes through pull requests.
+- **App lock (Proton Authenticator PIN/password):** when it is enabled, the vault key is derived from the app password and the helper reports `APP_LOCKED`. The README explains this. PIN support in the plugin may be added later if requested.
+- **Manifest:** `id` `sviat.proton-authenticator`, `name` "Proton Authenticator", `author` "devSviat", `kinds` `["service","bar-widget"]`.
 - **`install.sh`:**
-  - перевіряє залежності: `cargo`, `libsecret` (`secret-tool`), `wl-clipboard` ≥ 2.3, `sqlite`, `proton-authenticator`;
-  - збирає helper (`cargo build --release --locked`) і кладе бінарник у теку плагіна;
-  - відмовляється працювати через pipe (`curl | bash`);
-  - не використовує `sudo`;
-  - якщо чогось бракує, пише, що саме встановити.
-- **Каталог:** плагін піде з позначкою «Manual setup».
-- **Встановлення й оновлення через Omarchy** (рішення моє). `omarchy plugin add` і `update` лише клонують та підтягують git, `install.sh` вони не запускають. Тому:
-  - helper знає власну версію протоколу. `Service.qml` перевіряє її через `check`, і якщо helper відсутній або застарів, показує стан «Запустіть install.sh» з точною командою;
-  - збірка йде поза текою плагіна (`CARGO_TARGET_DIR` у `~/.cache/sviat.proton-authenticator`), у теку плагіна копіюється лише бінарник, а він сам у `.gitignore`. Так `omarchy plugin update` не спотикається об локальні зміни;
-  - `cargo build` завантажує крейти з crates.io за хешами з `Cargo.lock`. Це єдиний мережевий крок, і він відбувається тільки при встановленні.
-- **Розробка на машині користувача** (рішення моє). Тека плагіна — симлінк на `~/Projects/...`, як у nightlight. Перед публікацією один раз прогнати справжній шлях `omarchy plugin add` з GitHub у чистому стані.
-- **Що комітимо:** `docs/` комітимо, а `.superpowers/` (файли брейнштормінгу) додаємо в `.gitignore`.
+  - checks dependencies (`cargo`, `libsecret`/`secret-tool`, `glib2`/`gdbus`, `wl-clipboard` ≥ 2.3, `proton-authenticator`);
+  - builds the helper (`cargo build --release --locked`) outside the plugin directory and installs only the binary;
+  - refuses to run when piped (`curl | bash`);
+  - never uses `sudo`;
+  - names the package to install when something is missing.
+- **Updates:** `omarchy plugin add`/`update` only clone or pull. The service checks the helper's protocol version and shows "Run install.sh" with the exact command when the helper is missing or outdated. Building fetches crates from crates.io, pinned by `Cargo.lock`; this is the only network step and it happens only at install time.
+- **Catalog:** listed as "Manual setup". `omarchy-plugin-validate` must pass.
 - **README:**
-  - чесна модель загроз (див. «Не-цілі»);
-  - залежності;
-  - рекомендований хоткей (`Super+Alt+A`, з перевіркою, що він вільний);
-  - як працює синхронізація;
-  - що зробити, коли формат сейфу змінився після оновлення Proton.
-- **Публікація:** `omarchy-plugin-validate` має проходити.
-- **Встановлення в користувача:** окрім установки, додати `Super+Alt+A` у bindings Hyprland.
+  - an honest threat model (see "Non-goals");
+  - dependencies;
+  - the recommended hotkey;
+  - how sync works;
+  - what to do when the vault format changes after a Proton update.
 
-## Тестування
+## Testing
 
 - **Rust:**
-  - unit-тести TOTP/HOTP на векторах RFC 6238 і RFC 4226 (SHA1/256/512);
-  - тести розшифрування на **синтетичному** сейфі, який створює сам тест (відомий ключ, вигадані записи). Реальних секретів і реального сейфу в репозиторії немає;
-  - тести на кожен код помилки: зламаний формат, неправильний ключ, відсутній сейф.
-- **Перевірка безпеки вручну:**
-  - `/proc/<pid>/status` показує `VmLck` > 0;
-  - core dump вимкнено;
-  - `strace -f`: нуль записів на диск, нуль сокетів, крім D-Bus через secret-tool;
-  - секрету немає в `ps` або `/proc/*/cmdline` чи `environ`;
-  - коду немає в історії буфера Omarchy.
-- **Наживо:** справжній сейф користувача, порівняння кодів з офіційною програмою. Зміна в сейфі (новий акаунт з телефону → відкрити Proton) має підхопитися без перезапуску шелу.
+  - RFC 4226/6238 vectors (SHA1/256/512) and Steam codes;
+  - decryption tests on **synthetic** vaults built by the tests themselves (known key, fake entries). No real secrets or real vaults live in the repository;
+  - differential tests of the WAL applier and B-tree reader against real SQLite;
+  - truncation and mutation fuzzing of every parser;
+  - a test for every error code;
+  - the memlock budget test with a maximum-size vault.
+- **Manual security checks:**
+  - `VmLck` > 0 for a running helper;
+  - core dumps disabled;
+  - `strace -f`: no writes outside the prefs file, no sockets except D-Bus from the child tools;
+  - no secret in `ps`, `/proc/*/cmdline` or `environ`;
+  - no code in Omarchy's clipboard history.
+- **Live:** the author's real vault, comparing codes with the official app; a new account added on the phone must appear after the official app syncs, without restarting the shell.
 
-## Залишено на реалізацію
+## Left to the implementation
 
-- Точний формат JSON-протоколу та структура crate.
-- Як саме розбирати серіалізацію WebKit IndexedDB. Мінімальний, суворий парсер, що на будь-якій несподіванці повертає `VAULT_FORMAT_CHANGED`.
-- Механізм стеження за файлом (`FileView` із watch у QML чи `inotify` через окремий процес).
-- Іконки issuer-ів: ініціали за замовчуванням, а якщо в даних Proton є іконки, локальні без мережі.
-- Чи вміє Proton стартувати в треї (див. «Синхронізація»).
+- How to watch for vault changes beyond `check` polling, if polling proves insufficient.
+- Issuer icons: initials by default; local icons only if Proton's data provides them, never fetched from the network.
+- Whether Proton can start in the tray (see "Sync").

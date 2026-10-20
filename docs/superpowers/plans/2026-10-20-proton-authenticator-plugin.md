@@ -14,7 +14,9 @@
 - Quickshell/QML (omarchy-shell 4.0.6) and plain JS (`Model.js`) tested with node.
 - External tools, always by absolute path: `/usr/bin/secret-tool` (libsecret), `/usr/bin/gdbus` (glib2), `/usr/bin/wl-copy` (wl-clipboard ≥ 2.3).
 
-**Spec:** `docs/superpowers/specs/2026-10-20-proton-authenticator-plugin-design.md` (Ukrainian). Read it before starting any task.
+**Spec:** `docs/superpowers/specs/2026-10-20-proton-authenticator-plugin-design.md`. Read it before starting any task.
+
+> Several decisions changed during implementation (most notably: no SQLite in the shipped helper — the vault is read by an in-house WAL applier and B-tree reader; the clipboard holder keeps no hash of the code; `codes --allow-prompt` has a 120 s budget). The spec records the current design; where this plan and the spec disagree, the spec wins.
 
 ## Global Constraints
 
@@ -47,7 +49,7 @@
   - An `items` record has `id`, `issuer`, `name`, `order` (Int) and `__encryptedData` (Uint8Array = 12-byte IV ‖ AES-256-GCM ciphertext+tag, AAD `authenticator;item`).
   - The plaintext is JSON `{entryType: "Totp"|"Steam", note, period, secret, uri, syncMetadata?}`. Digits and algorithm come from the `uri` query; `secret` and `period` come from the fields.
   - `source == 1` → `APP_LOCKED`. `source == 2` → `UNSAFE_KEY_STORAGE`: refuse, and never read `unsafe_key`.
-- UI copy is English (published plugin). The spec's Ukrainian strings are intent, not literal copy.
+- UI copy is English (published plugin).
 - Code comments follow the user's global rules: default none; only why, constraints and invariants; no comments about the edit; never Russian.
 - Git:
   - work on `dev` (or `feature/*` branches merged into `dev`);
@@ -446,7 +448,7 @@
 
 **Interfaces:**
 - Consumes: the `Service.qml` API (Task 10) and `Model.js` (Task 11).
-- Behaviour (spec section "UX і UI"; the mockup is in `.superpowers/brainstorm/*/content/layout.html`, which is local only):
+- Behaviour (spec section "UX and UI"; the mockup is in `.superpowers/brainstorm/*/content/layout.html`, which is local only):
   - `Panel { moduleName/ipcTarget: "sviat.proton-authenticator"; manageIpc: false }`, as in nightlight.
   - On open: `Service.loadCodes(privacy ? selectedId : "")`, then focus the search field.
   - On close: `Service.clearCodes()`.
@@ -498,7 +500,7 @@
 
 - [ ] **Step 1:** Write `README.md`:
   - what the plugin does and why;
-  - an honest threat model (spec "Не-цілі"): it does not protect against malware running as the same user; it bypasses the app lock;
+  - an honest threat model (spec "Non-goals"): it does not protect against malware running as the same user; a vault protected by the app password is reported as `APP_LOCKED`;
   - dependencies, `install.sh`, and the `omarchy plugin add` flow with "Manual setup";
   - how sync works;
   - what to do after a Proton update breaks the format;
