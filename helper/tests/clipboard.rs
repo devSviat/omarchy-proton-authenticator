@@ -19,6 +19,8 @@ enum Mode {
     /// Outlives the start-up grace period, then exits as wl-copy does when
     /// another client takes the selection.
     ExitAfter500ms,
+    /// Loses the selection at once, as when a clipboard manager re-offers it.
+    ExitAfter50ms,
     FailAfter50ms,
     FailAfter500ms,
 }
@@ -35,6 +37,7 @@ impl Fake {
         let tail = match mode {
             Mode::Hold => "/usr/bin/sleep 30 &\nwait",
             Mode::ExitAfter500ms => "/usr/bin/sleep 0.5",
+            Mode::ExitAfter50ms => "/usr/bin/sleep 0.05",
             Mode::FailAfter50ms => "/usr/bin/sleep 0.05\nexit 1",
             Mode::FailAfter500ms => "/usr/bin/sleep 0.5\nexit 1",
         };
@@ -198,4 +201,19 @@ fn wl_copy_failing_later_is_an_error() {
         .unwrap();
     assert_eq!(hold.wait_and_clear().unwrap_err(), ErrorCode::Internal);
     assert_eq!(fake.read("clear"), None);
+}
+
+#[test]
+fn selection_taken_at_once_is_success_without_clearing() {
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let fake = Fake::new(Mode::ExitAfter50ms);
+    let start = Instant::now();
+    let hold = WlCopy::new(fake.program.clone())
+        .start(Zeroizing::new(CODE.to_string()), Duration::from_secs(30))
+        .unwrap();
+    hold.wait_and_clear().unwrap();
+    assert!(start.elapsed() < Duration::from_secs(1));
+    assert_eq!(fake.read("stdin").as_deref(), Some(CODE));
+    assert_eq!(fake.read("clear"), None);
+    assert_eq!(fake.read("killed"), None);
 }

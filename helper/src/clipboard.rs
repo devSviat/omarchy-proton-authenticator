@@ -15,8 +15,8 @@ const POLL_INTERVAL: Duration = Duration::from_millis(10);
 const TERM_GRACE: Duration = Duration::from_millis(500);
 const CLEAR_TIMEOUT: Duration = Duration::from_secs(2);
 /// wl-copy that cannot take the selection (no compositor, a protocol error)
-/// exits within milliseconds of reading its input. Still running after this
-/// long counts as holding the selection.
+/// exits with a failure within milliseconds of reading its input. Still
+/// running after this long counts as holding the selection.
 const START_GRACE: Duration = Duration::from_millis(250);
 
 pub trait Clipboard {
@@ -25,8 +25,8 @@ pub trait Clipboard {
     /// taken the selection by then.
     ///
     /// Errors: `DependencyMissing` if the clipboard tool is missing;
-    /// `Internal` if it fails, including exiting during the start-up grace
-    /// period.
+    /// `Internal` if it fails, including a failed exit during the start-up
+    /// grace period.
     fn start(&self, code: Zeroizing<String>, clear_after: Duration) -> Result<Box<dyn Hold>>;
 
     /// [`Clipboard::start`] followed by [`Hold::wait_and_clear`].
@@ -165,16 +165,30 @@ impl Clipboard for WlCopy {
         }
         match wait_exit(hold.pgid, Instant::now() + START_GRACE) {
             Ok(false) => Ok(Box::new(hold)),
-            // The selection died with its owner, so a clear could only hit
-            // another client's.
+            // Either way the selection is no longer ours, so a clear could
+            // only hit another client's. Status 0 means another client took
+            // it (a clipboard manager re-offering it), so the copy worked.
             Ok(true) => {
                 hold.settled = true;
-                let _ = reap(&mut hold.child);
-                Err(ErrorCode::Internal)
+                match reap(&mut hold.child) {
+                    Ok(status) if status.success() => Ok(Box::new(Settled)),
+                    _ => Err(ErrorCode::Internal),
+                }
             }
             Err(e) => Err(hold.fail(e)),
         }
     }
+}
+
+/// A selection another client already took over: nothing is left to clear.
+struct Settled;
+
+impl Hold for Settled {
+    fn wait_and_clear(self: Box<Self>) -> Result<()> {
+        Ok(())
+    }
+
+    fn abort(self: Box<Self>) {}
 }
 
 impl Hold for WlCopyHold {

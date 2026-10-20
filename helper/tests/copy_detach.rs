@@ -331,16 +331,16 @@ fn killed_holder_takes_the_code_along() {
     assert!(wait_until(Duration::from_secs(2), || !running(owner)));
 }
 
-/// Exits 1 shortly after reading the code, as wl-copy does when it cannot
-/// take the selection.
-fn failing_wl_copy(dir: &Path) -> PathBuf {
+/// Exits with `status` shortly after reading the code: 1 as wl-copy does
+/// when it cannot take the selection, 0 as when another client takes it.
+fn early_exit_wl_copy(dir: &Path, status: u8) -> PathBuf {
     let d = dir.display();
     let script = format!(
         "#!/bin/sh\n\
          if [ \"$1\" = --clear ]; then echo clear >> {d}/clear; exit 0; fi\n\
          /usr/bin/cat > {d}/stdin\n\
          /usr/bin/sleep 0.05\n\
-         exit 1\n"
+         exit {status}\n"
     );
     let program = dir.join("wl-copy");
     fs::write(&program, script).unwrap();
@@ -353,7 +353,7 @@ fn failing_wl_copy_is_reported() {
     let mut child = Command::new(std::env::current_exe().unwrap())
         .env_clear()
         .args([CHILD, "5000"])
-        .arg(failing_wl_copy(dir.path()))
+        .arg(early_exit_wl_copy(dir.path(), 1))
         .args(["copy", "demo-github", "--demo", "--clear-after", "5"])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -372,6 +372,29 @@ fn failing_wl_copy_is_reported() {
         dir.path()
     )
     .is_empty()));
+}
+
+/// A clipboard manager taking the selection right away is not a failure: the
+/// code reached the clipboard, and nothing is cleared.
+fn selection_taken_at_once_is_reported_as_copied() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut child = Command::new(std::env::current_exe().unwrap())
+        .env_clear()
+        .args([CHILD, "5000"])
+        .arg(early_exit_wl_copy(dir.path(), 0))
+        .args(["copy", "demo-github", "--demo", "--clear-after", "5"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    assert_eq!(read_until_eof(&mut child), "{\"ok\":true,\"protocol\":1}\n");
+    assert!(wait_exit(&mut child, Duration::from_secs(2)).success());
+    assert!(read_file(dir.path(), "stdin").is_some());
+    assert!(wait_until(Duration::from_secs(2), || processes_mentioning(
+        dir.path()
+    )
+    .is_empty()));
+    assert_eq!(read_file(dir.path(), "clear"), None);
 }
 
 /// Fds the caller leaks without `FD_CLOEXEC` (as Quickshell does) must not
@@ -624,7 +647,7 @@ fn main() -> ExitCode {
         eprintln!("copy_detach: skipped, RLIMIT_MEMLOCK is below 8 MiB");
         return ExitCode::SUCCESS;
     }
-    let tests: [(&str, fn()); 11] = [
+    let tests: [(&str, fn()); 12] = [
         ("copy_exits_and_holder_clears", || {
             copy_exits_and_holder_clears(false)
         }),
@@ -644,6 +667,10 @@ fn main() -> ExitCode {
         ("stalled_run_times_out", stalled_run_times_out),
         ("missing_wl_copy_is_reported", missing_wl_copy_is_reported),
         ("failing_wl_copy_is_reported", failing_wl_copy_is_reported),
+        (
+            "selection_taken_at_once_is_reported_as_copied",
+            selection_taken_at_once_is_reported_as_copied,
+        ),
         ("inherited_fds_are_closed", inherited_fds_are_closed),
         (
             "watchdog_kills_the_running_child_group",

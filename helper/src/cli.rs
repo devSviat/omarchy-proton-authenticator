@@ -346,8 +346,8 @@ fn finish(watchdog: Watchdog, reply: Rendered) -> ExitCode {
 }
 
 /// Replies only once a detached holder reports that wl-copy has read the
-/// code and is still running after a short grace period, so a missing
-/// wl-copy, or one that fails at once, is reported. The holder clears the
+/// code and did not fail within a short grace period, so a missing wl-copy,
+/// or one that fails at once, is reported. The holder clears the
 /// code at the deadline whatever happens to this process afterwards.
 fn copy(
     id: String,

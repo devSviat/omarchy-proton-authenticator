@@ -69,12 +69,12 @@ impl Holder {
     }
 
     /// Starts a holder for `code` and returns once it reports that wl-copy
-    /// took the code and outlived its start-up grace period. The code
+    /// took the code and did not fail within its start-up grace period. The code
     /// reaches the holder only through its stdin.
     ///
     /// Errors: `DependencyMissing` if wl-copy is missing; `MemlockFailed` if
     /// the holder cannot harden itself; `Internal` for any other failure,
-    /// including wl-copy exiting during its grace period and a holder that
+    /// including wl-copy failing during its grace period and a holder that
     /// cannot be started or does not confirm within [`STATUS_TIMEOUT`]. On
     /// error the holder's group has been killed.
     pub fn hand_off(&self, code: Zeroizing<String>, clear_after: Duration) -> Result<()> {

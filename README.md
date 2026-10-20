@@ -240,6 +240,10 @@ Priorities, in order: security, reliability, UX, UI. The design and threat model
 - **`wl-copy` itself.** It may buffer the copied code in a temporary file of its own while
   it holds the clipboard; that is outside the helper's control.
 - **Pasting.** Once you paste a code, the receiving application has it.
+- **Clipboard managers that persist the selection.** A manager that copies the code into a
+  selection of its own keeps it past the clear deadline: the plugin can only clear what
+  `wl-copy` still owns. When such a manager takes the selection at once, the copy still
+  counts as successful and nothing is cleared.
 - **A keyring that locks mid-request.** Without **Unlock** the helper first asks whether
   the keyring is unlocked and only then reads the key. If the keyring locks in the few
   milliseconds between the two, the keyring's own unlock prompt can appear without you
@@ -270,7 +274,7 @@ cd helper
 cargo test --locked
 cargo test --locked --release --features budget-probe --test budget   # locked-memory budget
 cd ..
-node --test tests/
+node --test tests/*.test.mjs
 ```
 
 The Rust tests use synthetic vaults built by the tests themselves; no real vault or secret
