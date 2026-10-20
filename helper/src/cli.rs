@@ -374,6 +374,17 @@ fn copy(
     Ok(EmptyBody {})
 }
 
+/// Reports a failed `harden()` and returns the exit code. A `hold` process
+/// answers in its status format, so `copy` can still tell `MEMLOCK_FAILED`.
+pub fn harden_failed(args: &[OsString], code: ErrorCode) -> ExitCode {
+    if args.first().is_some_and(|a| a == "hold") {
+        holder::report_harden_failure(code);
+    } else {
+        emit(&render_err(code));
+    }
+    ExitCode::FAILURE
+}
+
 /// Runs one helper invocation after `harden()`: parses `args` (without the
 /// program name), arms a watchdog that ends the process with `TIMEOUT` once
 /// the command's budget from `timeouts` is spent, dispatches, and writes the
@@ -421,6 +432,7 @@ pub fn run(
         } => render(copy(id, clear_after, demo, holder, timeouts)),
         Command::PrefsGet => render(prefs::default_dir().and_then(|dir| prefs::load(&dir))),
         Command::PrefsSet => render(prefs_set()),
+        // Dispatched above, before the run watchdog is armed.
         Command::Hold { .. } => render::<EmptyBody>(Err(ErrorCode::Internal)),
     };
     finish(watchdog, reply)

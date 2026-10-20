@@ -75,26 +75,42 @@ pub fn is_dumpable() -> bool {
     dumpable != 0
 }
 
-/// Starts a new session so the process outlives the caller's process group
-/// and terminal. A process group leader cannot do that; it is already out of
-/// reach of signals sent to its caller's group, so it only ignores SIGHUP.
-pub fn detach_session() -> Result<()> {
-    // SAFETY: setsid has no arguments and no memory effects.
-    if unsafe { libc::setsid() } != -1 {
-        return Ok(());
+/// Makes the child that `command` spawns start a new session before exec,
+/// so it leads its own session and process group (pgid == pid) and has no
+/// controlling terminal: signals to the caller's group or a terminal hangup
+/// never reach it. Must not be combined with `process_group`.
+pub fn new_session_on_spawn(command: &mut Command) {
+    // SAFETY: the closure runs in the child between fork and exec and makes
+    // only the async-signal-safe setsid call without allocating; an OS error
+    // is stored inline in io::Error.
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() == -1 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        });
     }
-    let refused = errno() == Some(libc::EPERM);
-    // SAFETY: getpgrp has no arguments and cannot fail.
-    let leads_group = unsafe { libc::getpgrp() } == std::process::id() as libc::pid_t;
-    if !refused || !leads_group {
-        return Err(ErrorCode::Internal);
+}
+
+/// Reads up to `buf.len()` bytes from fd 0 straight into `buf`, until EOF or
+/// the buffer is full, and returns how many were read. Unlike `io::stdin()`,
+/// this leaves no copy in a process-wide buffer.
+pub fn read_stdin_unbuffered(buf: &mut [u8]) -> Result<usize> {
+    let mut filled = 0;
+    while filled < buf.len() {
+        let rest = &mut buf[filled..];
+        // SAFETY: `rest` is a valid, writable buffer of `rest.len()` bytes for
+        // the duration of the call; fd 0 is only read, never closed.
+        let n = unsafe { libc::read(libc::STDIN_FILENO, rest.as_mut_ptr().cast(), rest.len()) };
+        match n {
+            0 => break,
+            n if n > 0 => filled += n as usize,
+            _ if errno() == Some(libc::EINTR) => {}
+            _ => return Err(ErrorCode::Internal),
+        }
     }
-    // SAFETY: SIG_IGN installs no handler code, so no Rust code can run in
-    // signal context.
-    if unsafe { libc::signal(libc::SIGHUP, libc::SIG_IGN) } == libc::SIG_ERR {
-        return Err(ErrorCode::Internal);
-    }
-    Ok(())
+    Ok(filled)
 }
 
 /// Points fd 1 at `/dev/null`, so a reader of our stdout sees EOF while the

@@ -584,6 +584,21 @@ fn hold_is_hardened_and_rejects_non_codes() {
     assert_eq!(out.status.code(), Some(1));
 }
 
+/// A holder that cannot lock its memory says so in its status format.
+#[test]
+fn hold_reports_memlock_failure() {
+    let out = Command::new("/usr/bin/prlimit")
+        .args(["--memlock=8192", "--", HELPER, "hold", "--clear-after", "5"])
+        .env_clear()
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .unwrap();
+    assert_eq!(out.stdout, b"M");
+    assert_eq!(out.status.code(), Some(1));
+}
+
 const ENTRY_FIELDS: [&str; 9] = [
     "account",
     "code",

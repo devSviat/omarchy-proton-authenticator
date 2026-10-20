@@ -1,7 +1,7 @@
 //! The process that keeps a copied code on the clipboard until its deadline.
 //!
 //! `copy` hands the code to `pa-helper hold --clear-after <N>`, a fresh exec
-//! of the same binary in its own process group, and exits once the holder
+//! of the same binary in a session of its own, and exits once the holder
 //! confirms. The caller may then kill the `copy` process and its whole group
 //! (a shell restart, a plugin reload) without stranding the code.
 
@@ -19,13 +19,14 @@ use crate::clipboard::Clipboard;
 use crate::error::{ErrorCode, Result};
 use crate::otp::{STEAM_ALPHABET, STEAM_LENGTH};
 use crate::proc::{
-    self, kill_and_reap, read_capped, release, scrubbed_command, spawn_tracked, IO_THREAD_STACK,
+    self, kill_and_reap, release, scrubbed_env_command, spawn_tracked, IO_THREAD_STACK,
 };
 use crate::sys;
 use crate::watchdog::Watchdog;
 
 const STATUS_OK: u8 = b'K';
 const STATUS_DEPENDENCY_MISSING: u8 = b'D';
+const STATUS_MEMLOCK_FAILED: u8 = b'M';
 const STATUS_FAILED: u8 = b'E';
 
 /// How long `copy` waits for the holder to confirm that wl-copy has the code.
@@ -48,47 +49,40 @@ pub fn valid_code(code: &[u8]) -> bool {
 
 /// Starts holder processes for `copy`.
 pub struct Holder {
-    program: Option<PathBuf>,
+    program: PathBuf,
     prefix: Vec<OsString>,
 }
 
 impl Holder {
-    /// Runs this very binary. The link is read once, here; if it is
-    /// unavailable, every hand-off fails with `Internal`.
+    /// Runs this very binary through `/proc/self/exe`, which the kernel
+    /// resolves to the running image even if the file has been replaced or
+    /// deleted since.
     pub fn current_exe() -> Self {
-        let program = std::fs::read_link("/proc/self/exe")
-            .ok()
-            .filter(|p| p.is_absolute());
-        Self {
-            program,
-            prefix: Vec::new(),
-        }
+        Self::new(PathBuf::from("/proc/self/exe"), Vec::new())
     }
 
     /// Runs `program` with `prefix` before the `hold` arguments, for a test
     /// harness that re-executes itself.
     pub fn new(program: PathBuf, prefix: Vec<OsString>) -> Self {
-        Self {
-            program: Some(program),
-            prefix,
-        }
+        Self { program, prefix }
     }
 
     /// Starts a holder for `code` and returns once it has put the code on the
     /// clipboard. The code reaches the holder only through its stdin.
     ///
-    /// Errors: `DependencyMissing` if wl-copy is missing; `Internal` for any
-    /// other failure, including a holder that does not confirm within
+    /// Errors: `DependencyMissing` if wl-copy is missing; `MemlockFailed` if
+    /// the holder cannot harden itself; `Internal` for any other failure,
+    /// including a holder that cannot be started or does not confirm within
     /// [`STATUS_TIMEOUT`]. On error the holder's group has been killed.
     pub fn hand_off(&self, code: Zeroizing<String>, clear_after: Duration) -> Result<()> {
-        let program = self.program.as_deref().ok_or(ErrorCode::Internal)?;
-        let mut command = scrubbed_command(program);
+        let mut command = scrubbed_env_command(&self.program);
         command
             .args(&self.prefix)
             .args(["hold", "--clear-after", &clear_after.as_secs().to_string()])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
+        sys::new_session_on_spawn(&mut command);
         let mut child = spawn_tracked(&mut command).map_err(|_| ErrorCode::Internal)?;
         match feed_and_confirm(&mut child, code) {
             Ok(()) => {
@@ -114,6 +108,7 @@ fn feed_and_confirm(child: &mut Child, code: Zeroizing<String>) -> Result<()> {
     match read_status(stdout)? {
         STATUS_OK => Ok(()),
         STATUS_DEPENDENCY_MISSING => Err(ErrorCode::DependencyMissing),
+        STATUS_MEMLOCK_FAILED => Err(ErrorCode::MemlockFailed),
         _ => Err(ErrorCode::Internal),
     }
 }
@@ -133,8 +128,12 @@ fn read_status(mut stdout: ChildStdout) -> Result<u8> {
     }
 }
 
+/// Reads fd 0 directly: `io::stdin()` would keep a plaintext copy of the
+/// code in its never-zeroized process-wide buffer.
 fn read_code() -> Result<Zeroizing<String>> {
-    let mut input = read_capped(io::stdin().lock(), MAX_CODE_LEN)?;
+    let mut input = Zeroizing::new(vec![0u8; MAX_CODE_LEN + 1]);
+    let len = sys::read_stdin_unbuffered(&mut input)?;
+    input.truncate(len);
     if !valid_code(&input) {
         return Err(ErrorCode::InvalidArgument);
     }
@@ -155,8 +154,14 @@ fn report(status: u8) -> io::Result<()> {
 fn status_of(e: ErrorCode) -> u8 {
     match e {
         ErrorCode::DependencyMissing => STATUS_DEPENDENCY_MISSING,
+        ErrorCode::MemlockFailed => STATUS_MEMLOCK_FAILED,
         _ => STATUS_FAILED,
     }
+}
+
+/// Reports a failed `harden()` in the holder's status format.
+pub fn report_harden_failure(e: ErrorCode) {
+    let _ = report(status_of(e));
 }
 
 /// The holder's watchdog action. Killing wl-copy takes the code off the
@@ -184,9 +189,7 @@ pub fn hold(clear_after: Duration, clipboard: &dyn Clipboard) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let started = sys::detach_session()
-        .and_then(|()| read_code())
-        .and_then(|code| clipboard.start(code, clear_after));
+    let started = read_code().and_then(|code| clipboard.start(code, clear_after));
     let hold = match started {
         Ok(hold) => hold,
         Err(e) => {

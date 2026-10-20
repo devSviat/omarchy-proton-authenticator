@@ -30,8 +30,16 @@ pub(crate) const IO_THREAD_STACK: usize = 64 * 1024;
 /// A command for `program` with a cleared environment plus the allow-listed
 /// variables, running in its own process group so it can be killed as a whole.
 pub(crate) fn scrubbed_command(program: &Path) -> Command {
+    let mut command = scrubbed_env_command(program);
+    command.process_group(0);
+    command
+}
+
+/// [`scrubbed_command`] without the process group, for a caller that makes
+/// the child lead a group of its own another way.
+pub(crate) fn scrubbed_env_command(program: &Path) -> Command {
     let mut command = Command::new(program);
-    command.env_clear().process_group(0);
+    command.env_clear();
     for name in ALLOWED_ENV {
         if let Some(value) = std::env::var_os(name) {
             command.env(name, value);
@@ -251,7 +259,7 @@ fn wait_for_both(
     }
 }
 
-pub(crate) fn read_capped(mut source: impl Read, max_out: usize) -> Captured {
+fn read_capped(mut source: impl Read, max_out: usize) -> Captured {
     let limit = max_out + 1;
     let mut buf = Zeroizing::new(Vec::with_capacity(limit));
     buf.resize(limit, 0);

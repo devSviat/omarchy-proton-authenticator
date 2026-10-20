@@ -22,13 +22,14 @@ use pa_helper::cli;
 use pa_helper::clipboard::WlCopy;
 use pa_helper::holder::Holder;
 use pa_helper::otp::{totp, Algorithm};
-use pa_helper::output::render_err;
 use pa_helper::proc::run_bounded;
 use pa_helper::sys::{self, kill_process_group, process_group_exists, Signal};
 use pa_helper::watchdog::Watchdog;
 
 const CHILD: &str = "--child";
 const BOUNDED_CHILD: &str = "--bounded-child";
+/// Like `CHILD`, but the holder runs under an 8 KiB `RLIMIT_MEMLOCK`.
+const STARVED_HOLDER_CHILD: &str = "--starved-holder-child";
 const RFC6238_SHA1_SEED: &[u8] = b"12345678901234567890";
 const BUDGET_KIB: u64 = 8192;
 
@@ -36,24 +37,33 @@ fn millis(arg: &OsString) -> Duration {
     Duration::from_millis(arg.to_str().unwrap().parse().unwrap())
 }
 
-/// Mirrors `main`, with a fake wl-copy and a holder that re-enters this mode.
-fn child(mut args: impl Iterator<Item = OsString>) -> ExitCode {
+/// Mirrors `main`, with a fake wl-copy and a holder that re-enters `CHILD`
+/// mode through `/proc/self/exe`.
+fn child(mut args: impl Iterator<Item = OsString>, starved_holder: bool) -> ExitCode {
     let timeout_arg = args.next().unwrap();
     let wl_copy = args.next().unwrap();
-    if let Err(code) = sys::harden() {
-        cli::emit(&render_err(code));
-        return ExitCode::FAILURE;
-    }
+    let hardened = sys::harden();
     let rest: Vec<OsString> = args.collect();
+    if let Err(code) = hardened {
+        return cli::harden_failed(&rest, code);
+    }
     let timeout = millis(&timeout_arg);
     let timeouts = cli::Timeouts {
         run: timeout,
         prompt: timeout,
     };
-    let holder = Holder::new(
-        std::env::current_exe().unwrap(),
-        vec![CHILD.into(), timeout_arg, wl_copy.clone()],
-    );
+    let reentry = vec![CHILD.into(), timeout_arg, wl_copy.clone()];
+    let holder = if starved_holder {
+        let mut prefix: Vec<OsString> = vec![
+            "--memlock=8192".into(),
+            "--".into(),
+            std::env::current_exe().unwrap().into(),
+        ];
+        prefix.extend(reentry);
+        Holder::new(PathBuf::from("/usr/bin/prlimit"), prefix)
+    } else {
+        Holder::new(PathBuf::from("/proc/self/exe"), reentry)
+    };
     cli::run(
         &rest,
         &WlCopy::new(PathBuf::from(wl_copy)),
@@ -195,6 +205,15 @@ fn our_uid() -> u32 {
     fs::metadata("/proc/self/environ").unwrap().uid()
 }
 
+/// Process group and session ids from /proc/<pid>/stat.
+fn group_and_session(pid: i32) -> (i32, i32) {
+    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
+    let mut fields = stat[stat.rfind(')').unwrap() + 2..].split(' ').skip(2);
+    let pgrp = fields.next().unwrap().parse().unwrap();
+    let session = fields.next().unwrap().parse().unwrap();
+    (pgrp, session)
+}
+
 /// A non-dumpable process's /proc entries belong to root.
 fn assert_hardened(pid: i32) {
     if our_uid() != 0 {
@@ -265,6 +284,7 @@ fn copy_exits_and_holder_clears(kill_caller_group: bool) {
         "{code} is not a demo GitHub code"
     );
     assert_ne!(holder, caller);
+    assert_eq!(group_and_session(holder), (holder, holder));
     assert_hardened(holder);
     assert_not_exposed(holder, &code);
     assert_not_exposed(owner, &code);
@@ -309,6 +329,29 @@ fn killed_holder_takes_the_code_along() {
         "term\n"
     );
     assert!(wait_until(Duration::from_secs(2), || !running(owner)));
+}
+
+fn holder_memlock_failure_is_reported() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut child = Command::new(std::env::current_exe().unwrap())
+        .env_clear()
+        .arg(STARVED_HOLDER_CHILD)
+        .arg("1000")
+        .arg(fake_wl_copy(dir.path()))
+        .args(["copy", "demo-github", "--demo", "--clear-after", "5"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let reply = read_until_eof(&mut child);
+    let status = wait_exit(&mut child, Duration::from_secs(2));
+    assert_eq!(
+        reply,
+        "{\"ok\":false,\"protocol\":1,\"error\":\"MEMLOCK_FAILED\"}\n"
+    );
+    assert_eq!(status.code(), Some(1));
+    assert_eq!(read_file(dir.path(), "holder"), None);
+    assert_eq!(processes_mentioning(dir.path()), Vec::<i32>::new());
 }
 
 fn hold_rejects_non_codes() {
@@ -486,7 +529,8 @@ fn memlock_fits() -> bool {
 fn main() -> ExitCode {
     let mut args = std::env::args_os().skip(1);
     match args.next() {
-        Some(mode) if mode == CHILD => return child(args),
+        Some(mode) if mode == CHILD => return child(args, false),
+        Some(mode) if mode == STARVED_HOLDER_CHILD => return child(args, true),
         Some(mode) if mode == BOUNDED_CHILD => return bounded_child(args),
         _ => {}
     }
@@ -494,7 +538,7 @@ fn main() -> ExitCode {
         eprintln!("copy_detach: skipped, RLIMIT_MEMLOCK is below 8 MiB");
         return ExitCode::SUCCESS;
     }
-    let tests: [(&str, fn()); 8] = [
+    let tests: [(&str, fn()); 9] = [
         ("copy_exits_and_holder_clears", || {
             copy_exits_and_holder_clears(false)
         }),
@@ -504,6 +548,10 @@ fn main() -> ExitCode {
         (
             "killed_holder_takes_the_code_along",
             killed_holder_takes_the_code_along,
+        ),
+        (
+            "holder_memlock_failure_is_reported",
+            holder_memlock_failure_is_reported,
         ),
         ("hold_rejects_non_codes", hold_rejects_non_codes),
         ("hold_rejects_bad_arguments", hold_rejects_bad_arguments),
