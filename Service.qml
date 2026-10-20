@@ -48,11 +48,13 @@ Item {
   property bool promptRunning: false
   property bool checkRunning: false
   property bool codesRunning: false
-  property var queuedOnlyId: null
+  property var queuedRequest: null
   // Bumped whenever codes are cleared, so a reply that was already in flight
   // cannot bring them back after the panel closed.
   property int codesGeneration: 0
-  property string lastOnlyId: ""
+  // Private until the panel says otherwise, so a reload triggered before the
+  // panel's first request cannot fetch every code.
+  property var lastRequest: Model.codesRequest(true, "")
 
   // prefs set calls are serialized: a writer killed mid-write leaves a temp
   // file that makes the next set fail for up to 30 s. The latest wanted state
@@ -116,27 +118,33 @@ Item {
       if (reply.ok) root.retryPrefs()
       if (root.checkStatus === "READY" && root.panelOpen
           && (codesFailed || root.vaultMtime !== before))
-        root.loadCodes(root.lastOnlyId)
+        root.loadCodes(root.lastRequest)
     })
   }
 
-  // onlyId: load just that entry (privacy mode keeps the others out of QML).
-  function loadCodes(onlyId) {
-    var id = onlyId ? String(onlyId) : ""
-    if (id !== "" && !Model.validId(id)) return
-    root.lastOnlyId = id
+  // request: Model.codesRequest(privateMode, revealId). In private mode only
+  // the revealed entry carries a code; codes already held for other rows are
+  // dropped at once instead of waiting for the reply.
+  function loadCodes(request) {
+    var req = Model.codesRequest(request ? request.privateMode : true, request ? request.revealId : "")
+    root.lastRequest = req
+    if (req.privateMode) {
+      var exposed = root.entries.some(function(e) {
+        return e && e.id !== req.revealId && (e.code !== null || e.nextCode !== null)
+      })
+      if (exposed) root.entries = Model.hideCodes(root.entries, req.revealId)
+    }
     if (root.promptRunning || !root.panelOpen) return
     if (root.codesRunning) {
-      root.queuedOnlyId = id
+      root.queuedRequest = req
       return
     }
-    runCodes(id, false)
+    runCodes(req, false)
   }
 
-  function runCodes(id, allowPrompt) {
+  function runCodes(req, allowPrompt) {
     if (!root.panelOpen) return
-    var args = ["codes"]
-    if (id !== "") args = args.concat(["--only", id])
+    var args = Model.codesArgs(req)
     if (allowPrompt) args.push("--allow-prompt")
     var generation = root.codesGeneration
     root.codesRunning = true
@@ -144,11 +152,20 @@ Item {
     helper.call(root.withDemo(args), "", function(reply) {
       root.codesRunning = false
       if (allowPrompt) root.promptRunning = false
+      var wanted = root.lastRequest
       if (generation === root.codesGeneration) {
         if (reply.ok) {
-          root.entries = Array.isArray(reply.entries) ? reply.entries : []
+          var entries = Array.isArray(reply.entries) ? reply.entries : []
+          // now first: entries watchers read it to time the next refresh.
           root.now = typeof reply.now === "number" ? reply.now : 0
+          // Privacy may have been switched on while a full listing was in flight.
+          root.entries = wanted.privateMode ? Model.hideCodes(entries, wanted.revealId) : entries
           root.codesError = ""
+        } else if (reply.error === "ITEM_NOT_FOUND" && req.revealId !== "") {
+          // The revealed entry was deleted; list the rest so a new selection
+          // can be revealed.
+          if (Model.sameRequest(wanted, req) && root.queuedRequest === null)
+            root.queuedRequest = Model.codesRequest(true, "")
         } else {
           root.entries = []
           root.codesError = reply.error
@@ -156,9 +173,9 @@ Item {
         root.applyStatus()
       }
       if (allowPrompt) root.refreshStatus()
-      if (root.queuedOnlyId !== null) {
-        var next = root.queuedOnlyId
-        root.queuedOnlyId = null
+      if (root.queuedRequest !== null) {
+        var next = root.queuedRequest
+        root.queuedRequest = null
         if (root.panelOpen) root.loadCodes(next)
       }
       root.flushPrefs()
@@ -168,7 +185,7 @@ Item {
 
   function clearCodes() {
     root.codesGeneration++
-    root.queuedOnlyId = null
+    root.queuedRequest = null
     root.entries = []
     root.now = 0
     root.codesError = ""
@@ -178,7 +195,7 @@ Item {
   // Shows the keyring's unlock prompt; the only call allowed to.
   function unlock() {
     if (root.promptRunning || root.codesRunning) return
-    runCodes(root.lastOnlyId, true)
+    runCodes(root.lastRequest, true)
   }
 
   // onDone(ok) fires when the helper has replied; it keeps running in the

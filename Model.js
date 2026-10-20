@@ -262,14 +262,207 @@ function isUrgent(remaining) {
   return typeof remaining === "number" && remaining <= 5
 }
 
-function ageLabel(nowSec, mtimeSec) {
+// "" under a minute, so callers can say "just now" instead.
+function ageSpan(nowSec, mtimeSec) {
   var age = nowSec - mtimeSec
-  if (!(age >= 60)) return "just now"
-  if (age < 3600) return Math.floor(age / 60) + " min ago"
-  if (age < 86400) return Math.floor(age / 3600) + " h ago"
-  return Math.floor(age / 86400) + " d ago"
+  if (!(age >= 60)) return ""
+  if (age < 3600) return Math.floor(age / 60) + " min"
+  if (age < 86400) return Math.floor(age / 3600) + " h"
+  return Math.floor(age / 86400) + " d"
+}
+
+function ageLabel(nowSec, mtimeSec) {
+  var span = ageSpan(nowSec, mtimeSec)
+  return span === "" ? "just now" : span + " ago"
 }
 
 function isStale(nowSec, mtimeSec, staleHours) {
   return nowSec - mtimeSec >= staleHours * 3600
+}
+
+// privateMode lists labels only and computes the code of revealId alone, so
+// codes of the other rows never reach QML.
+function codesRequest(privateMode, revealId) {
+  var priv = privateMode !== false
+  return { privateMode: priv, revealId: priv && validId(revealId) ? revealId : "" }
+}
+
+function codesArgs(request) {
+  var args = ["codes"]
+  if (!request.privateMode) return args
+  args.push("--private")
+  if (request.revealId !== "") args.push("--reveal", request.revealId)
+  return args
+}
+
+function sameRequest(a, b) {
+  return !!a && !!b && a.privateMode === b.privateMode && a.revealId === b.revealId
+}
+
+function hiddenEntry(e) {
+  return {
+    id: e.id, issuer: e.issuer, account: e.account, kind: null, code: null,
+    nextCode: null, period: null, digits: null, remaining: null
+  }
+}
+
+function hideCodes(entries, revealId) {
+  return (Array.isArray(entries) ? entries : [])
+    .filter(function(e) { return e !== null && e !== undefined })
+    .map(function(e) { return e.id === revealId && revealId !== "" ? e : hiddenEntry(e) })
+}
+
+// A private-mode row whose code was not revealed. Unsupported entries carry a
+// kind, so they never count as hidden.
+function isHidden(entry) {
+  return !!entry && (entry.kind === null || entry.kind === undefined)
+}
+
+function liveRemaining(entry, replyNowSec, nowSec) {
+  if (!entry || typeof entry.remaining !== "number") return null
+  return Math.max(0, replyNowSec + entry.remaining - nowSec)
+}
+
+// The 300 ms margin puts the reload after the boundary, so the helper is
+// already in the next period. -1 when nothing counts down.
+function refreshDelayMs(entries, replyNowSec, nowMs) {
+  var boundary = -1
+  ;(Array.isArray(entries) ? entries : []).forEach(function(e) {
+    if (!e || typeof e.remaining !== "number" || e.code === null) return
+    var at = replyNowSec + e.remaining
+    if (boundary < 0 || at < boundary) boundary = at
+  })
+  if (boundary < 0) return -1
+  var delay = boundary * 1000 + 300 - nowMs
+  return delay > 0 ? delay : 1000
+}
+
+function selectionIndex(list, id) {
+  if (!list || list.length === 0) return -1
+  for (var i = 0; i < list.length; i++) if (list[i].id === id) return i
+  return 0
+}
+
+function moveSelection(list, id, delta) {
+  if (!list || list.length === 0) return ""
+  var at = selectionIndex(list, id)
+  var next = Math.max(0, Math.min(list.length - 1, at + delta))
+  return list[next].id
+}
+
+function firstChar(text) {
+  var chars = Array.from(String(text || "").trim())
+  return chars.length > 0 ? chars[0].toLocaleUpperCase() : ""
+}
+
+function initial(entry) {
+  var e = entry || {}
+  return firstChar(e.issuer) || firstChar(e.account) || "?"
+}
+
+function issuerLabel(entry) {
+  var e = entry || {}
+  var issuer = String(e.issuer || "").trim()
+  if (issuer !== "") return issuer
+  var account = String(e.account || "").trim()
+  return account !== "" ? account : "Unnamed"
+}
+
+function maskedCode() {
+  return "\u2022\u2022\u2022 \u2022\u2022\u2022"
+}
+
+function canCopy(entry) {
+  return !!entry && validId(entry.id) && entry.kind !== "unsupported"
+}
+
+function shellQuote(text) {
+  return "'" + String(text).replace(/'/g, "'\\''") + "'"
+}
+
+function state(title, detail, action, actionLabel) {
+  return { title: title, detail: detail || "", action: action || "", actionLabel: actionLabel || "" }
+}
+
+var OPEN_PROTON = "Open Proton"
+
+// What the panel shows instead of the list; null when the list has rows.
+// s: { status, entryCount, matchCount, query, codesRunning, promptRunning, pluginDir }
+function emptyState(s) {
+  if (s.promptRunning) return state("Waiting for keyring\u2026", "Unlock it in the prompt")
+  switch (s.status) {
+  case "READY":
+    if (s.entryCount === 0)
+      return s.codesRunning ? state("Loading\u2026") : state("No accounts yet", "", "openProton", OPEN_PROTON)
+    if (s.matchCount === 0) return state("No matches", "Esc clears the search")
+    return null
+  case "LOADING":
+    return state("Loading\u2026")
+  case "KEYRING_LOCKED":
+    return state("Keyring is locked", "", "unlock", "Unlock")
+  case "VAULT_NOT_FOUND":
+    return state("Proton Authenticator not found", "", "openProton", OPEN_PROTON)
+  case "VAULT_FORMAT_CHANGED":
+  case "DECRYPT_FAILED":
+    return state("Vault format not recognised \u2014 the app may have updated", "", "openProton", OPEN_PROTON)
+  case "APP_LOCKED":
+    return state("App lock is on \u2014 this plugin can't read a password-locked vault")
+  case "UNSAFE_KEY_STORAGE":
+    return state("Proton is storing its key outside the keyring \u2014 open Proton and fix keyring access",
+                 "", "openProton", OPEN_PROTON)
+  case "HELPER_MISSING":
+  case "HELPER_OUTDATED":
+  case "DEPENDENCY_MISSING":
+    return state("Run install.sh", "cd " + shellQuote(s.pluginDir) + " && ./install.sh")
+  default:
+    return state(statusText(s.status), "", "retry", "Retry")
+  }
+}
+
+function syncLabel(nowSec, mtimeSec, staleHours, staleAllowed) {
+  if (!(mtimeSec > 0)) return { text: "", stale: false }
+  if (staleAllowed && isStale(nowSec, mtimeSec, staleHours))
+    return { text: "Not synced for " + ageSpan(nowSec, mtimeSec), stale: true }
+  return { text: "Updated " + ageLabel(nowSec, mtimeSec), stale: false }
+}
+
+var SHORT_STATUS = {
+  LOADING: "Checking",
+  KEYRING_LOCKED: "Keyring locked",
+  KEYRING_UNAVAILABLE: "No keyring",
+  KEY_NOT_FOUND: "Key not found",
+  VAULT_NOT_FOUND: "Vault not found",
+  VAULT_BUSY: "Vault busy",
+  VAULT_FORMAT_CHANGED: "Format changed",
+  DECRYPT_FAILED: "Decrypt failed",
+  APP_LOCKED: "App lock on",
+  UNSAFE_KEY_STORAGE: "Unsafe key storage",
+  DEPENDENCY_MISSING: "Dependency missing",
+  MEMLOCK_FAILED: "Memlock failed",
+  TIMEOUT: "Timed out",
+  OUTPUT_TOO_LARGE: "Reply too large",
+  HELPER_MISSING: "Helper missing",
+  HELPER_OUTDATED: "Helper outdated",
+  ITEM_NOT_FOUND: "Account not found"
+}
+
+// The panel header's subtitle; PanelHero uppercases it.
+// h: { status, entryCount, demo, promptRunning, nowSec, vaultMtime }
+function heroMeta(h) {
+  if (h.promptRunning) return "Waiting for keyring"
+  if (h.status !== "READY") {
+    return Object.prototype.hasOwnProperty.call(SHORT_STATUS, h.status)
+      ? SHORT_STATUS[h.status]
+      : String(h.status).toLowerCase().replace(/_/g, " ")
+  }
+  if (h.demo) return "Demo accounts"
+  var parts = []
+  if (h.entryCount > 0) parts.push(h.entryCount + (h.entryCount === 1 ? " account" : " accounts"))
+  if (h.vaultMtime > 0) parts.push("updated " + ageLabel(h.nowSec, h.vaultMtime))
+  return parts.join(" · ")
+}
+
+function heroBadge(privacy, demo) {
+  if (privacy) return "PRIVATE"
+  return demo ? "DEMO" : ""
 }
