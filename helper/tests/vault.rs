@@ -461,3 +461,84 @@ fn default_root_is_under_home_local_share() {
     let root = ProtonIdbVault::default_root().unwrap();
     assert!(root.ends_with(".local/share/me.proton.authenticator/databases/indexeddb"));
 }
+
+fn snapshot_dir(dir: &Path) -> Vec<(String, Vec<u8>)> {
+    listing(dir)
+        .into_iter()
+        .map(|n| {
+            let bytes = if n.ends_with("-shm") {
+                Vec::new()
+            } else {
+                fs::read(dir.join(&n)).unwrap()
+            };
+            (n, bytes)
+        })
+        .collect()
+}
+
+#[test]
+fn wal_vault_with_live_shm_is_untouched() {
+    let tmp = TempDir::new().unwrap();
+    let _writer = write_vault_wal(tmp.path(), &key_ref(), &[item(1)]);
+    let before = snapshot_dir(tmp.path());
+
+    assert_eq!(vault(tmp.path()).load().unwrap().1.len(), 1);
+
+    assert_eq!(snapshot_dir(tmp.path()), before);
+}
+
+#[test]
+fn wal_vault_without_shm_is_busy_and_untouched() {
+    let tmp = TempDir::new().unwrap();
+    fixture::write_vault_wal_closed(tmp.path(), &key_ref(), &[item(1)]);
+    let shm = tmp.path().join(format!("{}-shm", fixture::DB_NAME));
+    let _ = fs::remove_file(&shm);
+    let wal = tmp.path().join(format!("{}-wal", fixture::DB_NAME));
+    assert!(fs::metadata(&wal).unwrap().len() > 0);
+    let before = snapshot_dir(tmp.path());
+
+    assert_eq!(vault(tmp.path()).load().unwrap_err(), ErrorCode::VaultBusy);
+    assert_eq!(
+        vault(tmp.path()).modified().unwrap_err(),
+        ErrorCode::VaultBusy
+    );
+
+    assert_eq!(snapshot_dir(tmp.path()), before);
+    assert!(!shm.exists());
+}
+
+#[test]
+fn busy_newest_match_does_not_fall_back_to_older() {
+    let tmp = TempDir::new().unwrap();
+    write_vault(&tmp.path().join("old"), &key_ref(), &[]);
+    write_vault(&tmp.path().join("new"), &key_ref(), &[]);
+    set_mtime(&db_path(&tmp.path().join("old")), 1_000_000);
+    set_mtime(&db_path(&tmp.path().join("new")), 2_000_000);
+    let holder = fixture::open(&db_path(&tmp.path().join("new")));
+    holder.execute_batch("BEGIN EXCLUSIVE").unwrap();
+
+    assert_eq!(vault(tmp.path()).load().unwrap_err(), ErrorCode::VaultBusy);
+}
+
+#[test]
+fn oversized_db_is_format_changed() {
+    let tmp = TempDir::new().unwrap();
+    write_vault(tmp.path(), &key_ref(), &[]);
+    File::options()
+        .write(true)
+        .open(db_path(tmp.path()))
+        .unwrap()
+        .set_len(17 * 1024 * 1024)
+        .unwrap();
+    assert_eq!(
+        vault(tmp.path()).load().unwrap_err(),
+        ErrorCode::VaultFormatChanged
+    );
+}
+
+#[test]
+fn path_with_uri_special_chars_is_opened() {
+    let tmp = TempDir::new().unwrap();
+    write_vault(&tmp.path().join("a?b#c%d e"), &key_ref(), &[]);
+    assert!(vault(tmp.path()).load().is_ok());
+}

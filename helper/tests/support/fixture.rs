@@ -76,3 +76,15 @@ pub fn write_decoy(dir: &Path) {
     let conn = open(&db_path(dir));
     create_schema(&conn, &["mutexes"]);
 }
+
+/// Leaves un-checkpointed frames in `-wal` after the last connection closes.
+pub fn write_vault_wal_closed(dir: &Path, key_ref: &Value, items: &[Value]) {
+    use rusqlite::config::DbConfig;
+    std::fs::create_dir_all(dir).unwrap();
+    let conn = open(&db_path(dir));
+    conn.set_db_config(DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, true)
+        .unwrap();
+    conn.pragma_update(None, "journal_mode", "wal").unwrap();
+    conn.pragma_update(None, "wal_autocheckpoint", 0).unwrap();
+    populate(&conn, key_ref, items);
+}
