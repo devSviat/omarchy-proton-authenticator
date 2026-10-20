@@ -381,14 +381,33 @@ function shellQuote(text) {
   return "'" + String(text).replace(/'/g, "'\\''") + "'"
 }
 
-function state(title, detail, action, actionLabel) {
-  return { title: title, detail: detail || "", action: action || "", actionLabel: actionLabel || "" }
+// detail may span lines; command is what the copyCommand action copies.
+function state(title, detail, action, actionLabel, command) {
+  return {
+    title: title, detail: detail || "", action: action || "",
+    actionLabel: actionLabel || "", command: command || ""
+  }
+}
+
+function installCommand(pluginDir) {
+  return "cd " + shellQuote(pluginDir) + " && ./install.sh"
+}
+
+// A plain path reads better as ~/...; one that needs quoting is shown quoted
+// and in full, since ~ does not expand inside quotes.
+function installDisplay(pluginDir, home) {
+  var dir = String(pluginDir || "")
+  var shown
+  if (!/^[A-Za-z0-9._\/-]+$/.test(dir)) shown = shellQuote(dir)
+  else if (home && (dir === home || dir.indexOf(home + "/") === 0)) shown = "~" + dir.slice(String(home).length)
+  else shown = dir
+  return "cd " + shown + "\n./install.sh"
 }
 
 var OPEN_PROTON = "Open Proton"
 
 // What the panel shows instead of the list; null when the list has rows.
-// s: { status, entryCount, matchCount, codesRunning, promptRunning, pluginDir }
+// s: { status, entryCount, matchCount, codesRunning, promptRunning, pluginDir, home }
 function emptyState(s) {
   if (s.promptRunning) return state("Waiting for keyring\u2026", "Unlock it in the prompt")
   switch (s.status) {
@@ -414,7 +433,8 @@ function emptyState(s) {
   case "HELPER_MISSING":
   case "HELPER_OUTDATED":
   case "DEPENDENCY_MISSING":
-    return state("Run install.sh", "cd " + shellQuote(s.pluginDir) + " && ./install.sh")
+    return state("Run install.sh", installDisplay(s.pluginDir, s.home), "copyCommand", "Copy command",
+                 installCommand(s.pluginDir))
   default:
     return state(statusText(s.status), "", "retry", "Retry")
   }
@@ -460,7 +480,7 @@ function heroMeta(h) {
   var parts = []
   if (h.entryCount > 0) parts.push(h.entryCount + (h.entryCount === 1 ? " account" : " accounts"))
   if (h.vaultMtime > 0) parts.push("updated " + ageLabel(h.nowSec, h.vaultMtime))
-  return parts.join(" · ")
+  return parts.join(" \u00b7 ")
 }
 
 function heroBadge(privacy, demo) {
@@ -642,4 +662,33 @@ function issuerGlyph(issuer) {
     if (typeof glyph === "string") return glyph
   }
   return ""
+}
+
+// Shown inside the search field: the account count while the query is empty,
+// matches out of the total while filtering.
+function searchCount(query, total, matches) {
+  if (!(total > 0)) return ""
+  if (lower(query).trim() === "") return total + (total === 1 ? " account" : " accounts")
+  return matches + " / " + total
+}
+
+var ACTION_HINTS = {
+  unlock: "\u21b5 unlock",
+  openProton: "\u21b5 open Proton",
+  retry: "\u21b5 retry",
+  copyCommand: "\u21b5 copy command"
+}
+
+// Footer key hints matching what Enter does right now. compact drops the
+// least needed hint for a narrow footer.
+function footerHints(emptyState, privacy, rowCount) {
+  if (emptyState && emptyState.action !== "") {
+    var hint = Object.prototype.hasOwnProperty.call(ACTION_HINTS, emptyState.action)
+      ? ACTION_HINTS[emptyState.action] : ""
+    return { full: hint, compact: hint }
+  }
+  if (!(rowCount > 0)) return { full: "", compact: "" }
+  var copy = "\u21b5 copy"
+  var hide = privacy ? "^H show" : "^H hide"
+  return { full: [copy, "^P pin", hide].join(" \u00b7 "), compact: [copy, hide].join(" \u00b7 ") }
 }

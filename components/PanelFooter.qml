@@ -7,7 +7,8 @@ Item {
 
   property string syncText: ""
   property bool stale: false
-  property bool privacy: false
+  // Model.footerHints(): { full, compact }.
+  property var hints: ({ full: "", compact: "" })
   property color foreground: "transparent"
   property color dim: foreground
   property color urgent: foreground
@@ -26,7 +27,7 @@ Item {
     Text {
       visible: root.syncText !== ""
       textFormat: Text.PlainText
-      text: root.syncText + "  ·"
+      text: root.syncText + "  \u00b7"
       color: root.stale ? root.urgent : root.dim
       font.family: root.fontFamily
       font.pixelSize: Style.font.caption
@@ -57,12 +58,19 @@ Item {
     }
   }
 
+  TextMetrics {
+    id: fullHint
+    font: hint.font
+    text: root.hints.full
+  }
+
   Text {
     id: hint
     anchors.right: parent.right
     anchors.verticalCenter: parent.verticalCenter
     textFormat: Text.PlainText
-    text: (root.privacy ? "hidden · " : "") + "↵ copy"
+    text: fullHint.advanceWidth <= root.width - left.implicitWidth - Style.space(12)
+          ? root.hints.full : root.hints.compact
     color: root.dim
     font.family: root.fontFamily
     font.pixelSize: Style.font.caption

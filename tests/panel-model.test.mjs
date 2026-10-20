@@ -117,9 +117,9 @@ test("shellQuote wraps in single quotes", () => {
 test("emptyState maps every status", () => {
   const s = (status, extra) => M.emptyState(Object.assign({
     status, entryCount: 0, matchCount: 0, codesRunning: false,
-    promptRunning: false, pluginDir: "/p"
+    promptRunning: false, pluginDir: "/p", home: "/home/u"
   }, extra || {}))
-  assert.deepEqual(plain(s("KEYRING_LOCKED")), { title: "Keyring is locked", detail: "", action: "unlock", actionLabel: "Unlock" })
+  assert.deepEqual(plain(s("KEYRING_LOCKED")), { title: "Keyring is locked", detail: "", action: "unlock", actionLabel: "Unlock", command: "" })
   assert.equal(s("KEYRING_LOCKED", { promptRunning: true }).title, "Waiting for keyring…")
   assert.equal(s("KEYRING_LOCKED", { promptRunning: true }).action, "")
   assert.equal(s("VAULT_NOT_FOUND").title, "Proton Authenticator not found")
@@ -134,7 +134,9 @@ test("emptyState maps every status", () => {
   assert.equal(s("UNSAFE_KEY_STORAGE").action, "openProton")
   for (const code of ["HELPER_MISSING", "HELPER_OUTDATED", "DEPENDENCY_MISSING"]) {
     assert.equal(s(code).title, "Run install.sh")
-    assert.equal(s(code).detail, "cd '/p' && ./install.sh")
+    assert.equal(s(code).detail, "cd /p\n./install.sh")
+    assert.equal(s(code).action, "copyCommand")
+    assert.equal(s(code).command, "cd '/p' && ./install.sh")
   }
   assert.equal(s("READY").title, "No accounts yet")
   assert.equal(s("READY").action, "openProton")
@@ -268,4 +270,34 @@ test("issuerGlyph never falls back to short or common-word keys", () => {
   assert.equal(M.issuerGlyph("X"), M.issuerGlyph("Twitter"))
   assert.equal(M.issuerGlyph("Live"), M.issuerGlyph("Microsoft"))
   assert.equal(M.issuerGlyph("Steam"), M.issuerGlyph("steampowered.com"))
+})
+
+test("installDisplay shortens home and quotes odd paths", () => {
+  assert.equal(M.installDisplay("/home/u/.config/omarchy/plugins/sviat.proton-authenticator", "/home/u"),
+               "cd ~/.config/omarchy/plugins/sviat.proton-authenticator\n./install.sh")
+  assert.equal(M.installDisplay("/home/uu/p", "/home/u"), "cd /home/uu/p\n./install.sh")
+  assert.equal(M.installDisplay("/home/u/My Plugins/p", "/home/u"), "cd '/home/u/My Plugins/p'\n./install.sh")
+  assert.equal(M.installCommand("/home/u/p"), "cd '/home/u/p' && ./install.sh")
+})
+
+test("searchCount reads the same with or without privacy", () => {
+  assert.equal(M.searchCount("", 6, 6), "6 accounts")
+  assert.equal(M.searchCount("  ", 6, 6), "6 accounts")
+  assert.equal(M.searchCount("", 1, 1), "1 account")
+  assert.equal(M.searchCount("gh", 6, 1), "1 / 6")
+  assert.equal(M.searchCount("", 0, 0), "")
+})
+
+test("footerHints follow what Enter does", () => {
+  const st = (action) => ({ title: "t", detail: "", action, actionLabel: "", command: "" })
+  assert.equal(M.footerHints(st("unlock"), false, 0).full, "\u21b5 unlock")
+  assert.equal(M.footerHints(st("openProton"), false, 0).full, "\u21b5 open Proton")
+  assert.equal(M.footerHints(st("retry"), false, 0).full, "\u21b5 retry")
+  assert.equal(M.footerHints(st("copyCommand"), false, 0).full, "\u21b5 copy command")
+  assert.equal(M.footerHints(st("unlock"), true, 6).full, "\u21b5 unlock")
+  assert.equal(M.footerHints(st(""), false, 0).full, "")
+  assert.equal(M.footerHints(null, false, 0).full, "")
+  assert.deepEqual(plain(M.footerHints(null, false, 6)), { full: "\u21b5 copy \u00b7 ^P pin \u00b7 ^H hide", compact: "\u21b5 copy \u00b7 ^H hide" })
+  assert.equal(M.footerHints(null, true, 6).full, "\u21b5 copy \u00b7 ^P pin \u00b7 ^H show")
+  assert.equal(M.footerHints(st("constructor"), false, 0).full, "")
 })

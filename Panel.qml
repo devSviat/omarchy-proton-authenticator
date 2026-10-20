@@ -1,4 +1,5 @@
 import QtQuick
+import Quickshell
 import qs.Commons
 import qs.Ui
 import "Model.js" as Model
@@ -53,8 +54,13 @@ Panel {
     matchCount: root.filtered.length,
     codesRunning: root.service ? root.service.codesRunning : false,
     promptRunning: root.service ? root.service.promptRunning : false,
-    pluginDir: root.service ? root.service.pluginDir : ""
+    pluginDir: root.service ? root.service.pluginDir : "",
+    home: Quickshell.env("HOME") || ""
   })
+  // Errors and empty vaults leave nothing to search.
+  readonly property bool searchShown: root.status === "READY" && root.entries.length > 0
+  readonly property var hints: Model.footerHints(root.emptyState, root.privacy, root.filtered.length)
+  property string actionFeedback: ""
   // The header carries the sync age; the footer only warns when it is stale.
   readonly property var syncInfo: root.service && root.service.staleHintAllowed
     ? Model.syncLabel(root.nowSec, root.service.vaultMtime, root.staleHours, true)
@@ -233,8 +239,21 @@ Panel {
     } else if (action === "retry") {
       root.service.refreshStatus()
       root.service.loadCodes(root.wantedRequest)
+    } else if (action === "copyCommand" && root.emptyState && root.emptyState.command !== "") {
+      // Not a secret: it goes to the ordinary clipboard and its history.
+      Quickshell.clipboardText = root.emptyState.command
+      root.actionFeedback = "Copied \u2713"
+      actionFeedbackTimer.restart()
     }
   }
+
+  Timer {
+    id: actionFeedbackTimer
+    interval: 1500
+    onTriggered: root.actionFeedback = ""
+  }
+
+  onSearchShownChanged: if (!root.searchShown) root.query = ""
 
   function activate() {
     root.selectedByPointer = false
@@ -260,12 +279,12 @@ Panel {
     feedbackTimer.stop()
     root.copying = true
     root.feedbackId = entry.id
-    root.feedbackText = "Copying…"
+    root.feedbackText = "Copying\u2026"
     root.service.copy(entry.id, root.clearClipboardSeconds, function(ok) {
       if (generation !== root.copyGeneration) return
       root.copying = false
       if (!root.opened) return
-      root.feedbackText = ok ? "Copied ✓" : "Copy failed"
+      root.feedbackText = ok ? "Copied \u2713" : "Copy failed"
       root.feedbackClose = ok && root.closeOnCopy
       feedbackTimer.interval = ok ? 600 : 1500
       feedbackTimer.restart()
@@ -333,16 +352,18 @@ Panel {
 
       PanelSeparator { foreground: root.foreground }
 
+      // Kept in the tree while hidden: it holds the keyboard focus.
       SearchField {
         id: searchField
         width: parent.width
+        height: root.searchShown ? implicitHeight : 0
+        opacity: root.searchShown ? 1 : 0
         foreground: root.foreground
         dim: root.dim
         font.family: root.fontFamily
         text: root.query
-        countText: root.query === "" || root.entries.length === 0 ? ""
-                   : root.filtered.length + " / " + root.entries.length
-        onTextEdited: root.query = text
+        countText: Model.searchCount(root.query, root.entries.length, root.filtered.length)
+        onTextEdited: root.query = root.searchShown ? text : ""
         onMoveRequested: function(delta) { root.move(delta) }
         onPageRequested: function(direction) { root.move(direction * 5) }
         onActivateRequested: root.activate()
@@ -356,6 +377,7 @@ Panel {
         visible: root.emptyState !== null
         width: parent.width
         info: root.emptyState
+        feedback: root.actionFeedback
         foreground: root.foreground
         dim: root.dim
         fontFamily: root.fontFamily
@@ -414,7 +436,7 @@ Panel {
         width: parent.width
         syncText: root.syncInfo.stale ? root.syncInfo.text : ""
         stale: root.syncInfo.stale
-        privacy: root.privacy
+        hints: root.hints
         foreground: root.foreground
         dim: root.dim
         urgent: root.urgent
