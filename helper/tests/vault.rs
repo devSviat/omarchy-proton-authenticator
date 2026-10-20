@@ -488,41 +488,6 @@ fn rejects_view_disguised_as_table() {
 }
 
 #[test]
-fn limits_and_defensive_flags_applied() {
-    use rusqlite::config::DbConfig;
-    use rusqlite::limits::Limit;
-    let tmp = TempDir::new().unwrap();
-    write_vault(tmp.path(), &key_ref(), &[]);
-    let memory = pa_helper::vault::open_memory().unwrap();
-    {
-        let conn = &memory;
-        assert!(conn.db_config(DbConfig::SQLITE_DBCONFIG_DEFENSIVE).unwrap());
-        assert!(!conn
-            .db_config(DbConfig::SQLITE_DBCONFIG_TRUSTED_SCHEMA)
-            .unwrap());
-        assert!(!conn
-            .db_config(DbConfig::SQLITE_DBCONFIG_ENABLE_TRIGGER)
-            .unwrap());
-        assert!(!conn
-            .db_config(DbConfig::SQLITE_DBCONFIG_ENABLE_VIEW)
-            .unwrap());
-        assert_eq!(conn.limit(Limit::SQLITE_LIMIT_LENGTH).unwrap(), 1024 * 1024);
-        assert_eq!(conn.limit(Limit::SQLITE_LIMIT_SQL_LENGTH).unwrap(), 4096);
-        assert_eq!(conn.limit(Limit::SQLITE_LIMIT_ATTACHED).unwrap(), 0);
-        let cell_check: i64 = conn
-            .query_row("PRAGMA cell_size_check", [], |r| r.get(0))
-            .unwrap();
-        let mmap: Option<i64> =
-            rusqlite::OptionalExtension::optional(
-                conn.query_row("PRAGMA mmap_size", [], |r| r.get(0)),
-            )
-            .unwrap();
-        assert_eq!(cell_check, 1);
-        assert!(matches!(mmap, None | Some(0)));
-    }
-}
-
-#[test]
 fn corrupted_pages_are_format_changed() {
     let tmp = TempDir::new().unwrap();
     let items: Vec<Value> = (0..20).map(item).collect();
@@ -549,4 +514,36 @@ fn partially_corrupted_db_never_panics() {
     data[mid..mid + 600].fill(0xA5);
     fs::write(&db, data).unwrap();
     let _ = vault(tmp.path()).load();
+}
+
+#[test]
+fn broken_newer_candidate_does_not_fall_back_to_older() {
+    let tmp = TempDir::new().unwrap();
+    write_vault(&tmp.path().join("old"), &key_ref(), &[item(1)]);
+    write_vault(&tmp.path().join("new"), &key_ref(), &[item(1)]);
+    set_mtime(&db_path(&tmp.path().join("old")), 1_000_000);
+    set_mtime(&db_path(&tmp.path().join("new")), 2_000_000);
+    assert!(vault(tmp.path()).load().is_ok());
+
+    let new_db = db_path(&tmp.path().join("new"));
+    let mut data = fs::read(&new_db).unwrap();
+    data[4096..].fill(0xA5);
+    fs::write(&new_db, data).unwrap();
+    set_mtime(&new_db, 2_000_000);
+    assert_eq!(
+        vault(tmp.path()).load().unwrap_err(),
+        ErrorCode::VaultFormatChanged
+    );
+
+    File::options()
+        .write(true)
+        .open(&new_db)
+        .unwrap()
+        .set_len(3 * 1024 * 1024)
+        .unwrap();
+    set_mtime(&new_db, 2_000_000);
+    assert_eq!(
+        vault(tmp.path()).load().unwrap_err(),
+        ErrorCode::VaultFormatChanged
+    );
 }

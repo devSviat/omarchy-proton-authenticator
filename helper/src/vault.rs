@@ -1,19 +1,16 @@
-use std::cmp::Ordering;
 use std::ffi::OsString;
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
-use std::io::{Cursor, Read};
+use std::io::Read;
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use rusqlite::config::DbConfig;
-use rusqlite::limits::Limit;
-use rusqlite::{Connection, OptionalExtension};
 use zeroize::Zeroizing;
 
 use crate::error::{ErrorCode, Result};
+use crate::sqlite_file::{Column, Image};
 use crate::ssv::{self, Value};
 use crate::wal;
 
@@ -22,11 +19,9 @@ const MAX_WALK_DEPTH: usize = 6;
 const MAX_CANDIDATES: usize = 32;
 const MAX_DIR_ENTRIES: usize = 10_000;
 const MAX_ITEMS: usize = 1000;
-const MAX_MAIN_BYTES: u64 = 4 * 1024 * 1024;
-const MAX_WAL_BYTES: u64 = 4 * 1024 * 1024;
-const MAX_IMAGE_BYTES: usize = 8 * 1024 * 1024;
-const LIMIT_LENGTH_BYTES: i32 = 1024 * 1024;
-const LIMIT_SQL_LENGTH_BYTES: i32 = 4096;
+const MAX_MAIN_BYTES: u64 = 2 * 1024 * 1024;
+const MAX_WAL_BYTES: u64 = 2 * 1024 * 1024;
+const MAX_IMAGE_BYTES: usize = 2 * 1024 * 1024;
 const STABLE_RETRIES: usize = 3;
 const STABLE_PAUSE: Duration = Duration::from_millis(50);
 
@@ -79,7 +74,14 @@ struct Candidate {
 
 enum Probe {
     NoMatch,
-    Match(Connection),
+    Match(Matched),
+}
+
+struct Matched {
+    image: Zeroizing<Vec<u8>>,
+    records_root: u32,
+    items_id: i64,
+    key_id: i64,
 }
 
 /// Raw bytes of the database file and its `-wal`, read as one consistent view.
@@ -101,7 +103,7 @@ impl ProtonIdbVault {
         Ok(home.join(".local/share/me.proton.authenticator/databases/indexeddb"))
     }
 
-    fn select(&self) -> Result<(Candidate, Connection)> {
+    fn select(&self) -> Result<(Candidate, Matched)> {
         let mut candidates: Vec<Candidate> = find_candidates(&self.root)
             .into_iter()
             .filter_map(|path| {
@@ -113,7 +115,7 @@ impl ProtonIdbVault {
         for candidate in candidates {
             match probe(&candidate.path)? {
                 Probe::NoMatch => continue,
-                Probe::Match(conn) => return Ok((candidate, conn)),
+                Probe::Match(matched) => return Ok((candidate, matched)),
             }
         }
         Err(ErrorCode::VaultNotFound)
@@ -130,9 +132,9 @@ impl VaultSource for ProtonIdbVault {
     }
 
     fn load(&self) -> Result<(StorageKeyRef, Vec<EncryptedItem>)> {
-        let (_, conn) = self.select()?;
-        let key_ref = read_key_ref(&conn)?;
-        let items = read_items(&conn)?;
+        let (_, matched) = self.select()?;
+        let key_ref = read_key_ref(&matched)?;
+        let items = read_items(&matched)?;
         Ok((key_ref, items))
     }
 }
@@ -189,33 +191,6 @@ fn wal_path(db: &Path) -> PathBuf {
     let mut name = OsString::from(db.as_os_str());
     name.push("-wal");
     PathBuf::from(name)
-}
-
-fn register_collation(conn: &Connection) -> rusqlite::Result<()> {
-    conn.create_collation("IDBKEY", |a, b| -> Ordering {
-        a.as_bytes().cmp(b.as_bytes())
-    })
-}
-
-/// Applies SQLite's guidance for untrusted database files before any query.
-pub fn harden(conn: &Connection) -> rusqlite::Result<()> {
-    conn.set_db_config(DbConfig::SQLITE_DBCONFIG_DEFENSIVE, true)?;
-    conn.set_db_config(DbConfig::SQLITE_DBCONFIG_TRUSTED_SCHEMA, false)?;
-    conn.set_db_config(DbConfig::SQLITE_DBCONFIG_ENABLE_TRIGGER, false)?;
-    conn.set_db_config(DbConfig::SQLITE_DBCONFIG_ENABLE_VIEW, false)?;
-    conn.set_limit(Limit::SQLITE_LIMIT_LENGTH, LIMIT_LENGTH_BYTES)?;
-    conn.set_limit(Limit::SQLITE_LIMIT_SQL_LENGTH, LIMIT_SQL_LENGTH_BYTES)?;
-    conn.set_limit(Limit::SQLITE_LIMIT_ATTACHED, 0)?;
-    conn.pragma_update(None, "cell_size_check", true)?;
-    conn.pragma_update(None, "mmap_size", 0)?;
-    register_collation(conn)
-}
-
-pub fn open_memory() -> rusqlite::Result<Connection> {
-    let conn = Connection::open_in_memory()?;
-    harden(&conn)?;
-    conn.pragma_update(None, "temp_store", "MEMORY")?;
-    Ok(conn)
 }
 
 #[derive(PartialEq, Clone, Copy)]
@@ -354,73 +329,52 @@ fn probe(path: &Path) -> Result<Probe> {
     )?;
     drop(files);
 
-    let mut conn = open_memory().map_err(|_| ErrorCode::Internal)?;
-    conn.deserialize_read_exact("main", Cursor::new(&image[..]), image.len(), true)
-        .map_err(|_| ErrorCode::VaultFormatChanged)?;
-    drop(image);
-
-    let changed = |_| ErrorCode::VaultFormatChanged;
-    if !is_table(&conn, "ObjectStoreInfo").map_err(changed)? {
+    let parsed = Image::parse(&image)?;
+    let Some(store_info_root) = parsed.table_root("ObjectStoreInfo")? else {
         return Ok(Probe::NoMatch);
-    }
-    if !has_required_stores(&conn).map_err(changed)? {
+    };
+    let mut items_id = None;
+    let mut key_id = None;
+    parsed.scan(store_info_root, |rowid, columns| {
+        let [_, Column::Text(name), ..] = columns else {
+            return Err(ErrorCode::VaultFormatChanged);
+        };
+        match *name {
+            "items" => items_id = Some(rowid),
+            "storageKey" => key_id = Some(rowid),
+            _ => {}
+        }
+        Ok(())
+    })?;
+    let (Some(items_id), Some(key_id)) = (items_id, key_id) else {
         return Ok(Probe::NoMatch);
-    }
-    if !is_table(&conn, "Records").map_err(changed)? {
-        return Err(ErrorCode::VaultFormatChanged);
-    }
-    if !quick_check_ok(&conn).map_err(changed)? {
-        return Err(ErrorCode::VaultFormatChanged);
-    }
-    Ok(Probe::Match(conn))
-}
-
-fn quick_check_ok(conn: &Connection) -> rusqlite::Result<bool> {
-    let mut stmt = conn.prepare("PRAGMA quick_check")?;
-    let rows = stmt
-        .query_map([], |row| row.get::<_, String>(0))?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(rows == ["ok"])
-}
-
-fn is_table(conn: &Connection, name: &str) -> rusqlite::Result<bool> {
-    let found: Option<i64> = conn
-        .query_row(
-            "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = ?1",
-            [name],
-            |row| row.get(0),
-        )
-        .optional()?;
-    Ok(found.is_some())
-}
-
-fn store_id(conn: &Connection, name: &str) -> rusqlite::Result<Option<i64>> {
-    conn.query_row(
-        "SELECT id FROM ObjectStoreInfo WHERE name = ?1",
-        [name],
-        |row| row.get(0),
-    )
-    .optional()
-}
-
-fn has_required_stores(conn: &Connection) -> rusqlite::Result<bool> {
-    Ok(store_id(conn, "items")?.is_some() && store_id(conn, "storageKey")?.is_some())
-}
-
-fn records(conn: &Connection, store: &str, limit: usize) -> Result<Vec<Zeroizing<Vec<u8>>>> {
-    let id = store_id(conn, store)
-        .map_err(|_| ErrorCode::VaultFormatChanged)?
+    };
+    let records_root = parsed
+        .table_root("Records")?
         .ok_or(ErrorCode::VaultFormatChanged)?;
-    let mut stmt = conn
-        .prepare("SELECT value FROM Records WHERE objectStoreID = ?1 ORDER BY recordID LIMIT ?2")
-        .map_err(|_| ErrorCode::VaultFormatChanged)?;
-    let rows = stmt
-        .query_map(rusqlite::params![id, limit as i64], |row| {
-            row.get::<_, Vec<u8>>(0).map(Zeroizing::new)
-        })
-        .map_err(|_| ErrorCode::VaultFormatChanged)?;
-    rows.collect::<rusqlite::Result<Vec<_>>>()
-        .map_err(|_| ErrorCode::VaultFormatChanged)
+    Ok(Probe::Match(Matched {
+        image,
+        records_root,
+        items_id,
+        key_id,
+    }))
+}
+
+fn records(matched: &Matched, store: i64, limit: usize) -> Result<Vec<Zeroizing<Vec<u8>>>> {
+    let parsed = Image::parse(&matched.image)?;
+    let mut out = Vec::new();
+    parsed.scan(matched.records_root, |_, columns| {
+        let [Column::Int(store_id), Column::Text(_) | Column::Blob(_), Column::Blob(value), ..] =
+            columns
+        else {
+            return Err(ErrorCode::VaultFormatChanged);
+        };
+        if *store_id == store && out.len() < limit {
+            out.push(Zeroizing::new(value.to_vec()));
+        }
+        Ok(())
+    })?;
+    Ok(out)
 }
 
 fn string_field(record: &Value, name: &str) -> Result<String> {
@@ -444,8 +398,8 @@ fn bytes_field(record: &Value, name: &str) -> Result<Vec<u8>> {
     }
 }
 
-fn read_key_ref(conn: &Connection) -> Result<StorageKeyRef> {
-    let mut blobs = records(conn, "storageKey", 2)?;
+fn read_key_ref(matched: &Matched) -> Result<StorageKeyRef> {
+    let mut blobs = records(matched, matched.key_id, 2)?;
     if blobs.len() != 1 {
         return Err(ErrorCode::VaultFormatChanged);
     }
@@ -468,8 +422,8 @@ fn read_key_ref(conn: &Connection) -> Result<StorageKeyRef> {
     })
 }
 
-fn read_items(conn: &Connection) -> Result<Vec<EncryptedItem>> {
-    let blobs = records(conn, "items", MAX_ITEMS + 1)?;
+fn read_items(matched: &Matched) -> Result<Vec<EncryptedItem>> {
+    let blobs = records(matched, matched.items_id, MAX_ITEMS + 1)?;
     if blobs.len() > MAX_ITEMS {
         return Err(ErrorCode::OutputTooLarge);
     }

@@ -68,7 +68,7 @@ fn committed_frames(wal: &[u8], page_size: usize) -> Result<Option<Committed>> {
         _ => return Ok(None),
     };
     if be32(wal, 4) != WAL_VERSION {
-        return Ok(None);
+        return Err(ErrorCode::VaultFormatChanged);
     }
     if checksum(big_endian, (0, 0), &wal[..24]) != (be32(wal, 24), be32(wal, 28)) {
         return Ok(None);
@@ -110,28 +110,34 @@ fn committed_frames(wal: &[u8], page_size: usize) -> Result<Option<Committed>> {
     Ok(Some(Committed { frames, db_pages }))
 }
 
-/// Builds a rollback-journal style image of the database as SQLite would see
-/// it with the WAL applied, without SQLite ever touching the files.
+/// Builds the database image as SQLite would see it with the WAL applied.
+/// The buffer is allocated once at its final size so no unzeroed copy is left behind.
 pub fn build_image(
     main: &[u8],
     wal: Option<&[u8]>,
     max_image: usize,
 ) -> Result<Zeroizing<Vec<u8>>> {
     let page_size = page_size(main)?;
-    let mut image = Zeroizing::new(main.to_vec());
-
-    if let Some(committed) = wal
-        .map(|w| committed_frames(w, page_size))
-        .transpose()?
-        .flatten()
-    {
-        let wal = wal.ok_or(ErrorCode::Internal)?;
-        let total = usize::try_from(committed.db_pages)
+    let committed = match wal {
+        Some(wal) => committed_frames(wal, page_size)?.map(|c| (wal, c)),
+        None => None,
+    };
+    let total = match &committed {
+        Some((_, c)) => usize::try_from(c.db_pages)
             .ok()
             .and_then(|pages| pages.checked_mul(page_size))
-            .filter(|&t| t <= max_image)
-            .ok_or(ErrorCode::VaultFormatChanged)?;
-        image.resize(total, 0);
+            .ok_or(ErrorCode::VaultFormatChanged)?,
+        None => main.len(),
+    };
+    if total > max_image || total == 0 {
+        return Err(ErrorCode::VaultFormatChanged);
+    }
+
+    let mut image = Zeroizing::new(Vec::with_capacity(total));
+    image.extend_from_slice(&main[..main.len().min(total)]);
+    image.resize(total, 0);
+
+    if let Some((wal, committed)) = committed {
         for (page_number, data_offset) in committed.frames {
             if page_number > committed.db_pages {
                 continue;
@@ -149,25 +155,5 @@ pub fn build_image(
             dest.copy_from_slice(src);
         }
     }
-
-    if image.len() > max_image {
-        return Err(ErrorCode::VaultFormatChanged);
-    }
-    patch_header(&mut image, page_size)?;
     Ok(image)
-}
-
-// Versions 1/1 make SQLite treat the image as a rollback-journal database;
-// the page count only counts when version-valid-for equals the change counter.
-fn patch_header(image: &mut [u8], page_size: usize) -> Result<()> {
-    let pages =
-        u32::try_from(image.len() / page_size).map_err(|_| ErrorCode::VaultFormatChanged)?;
-    if pages == 0 || image.len() < DB_HEADER_LEN {
-        return Err(ErrorCode::VaultFormatChanged);
-    }
-    image[18] = 1;
-    image[19] = 1;
-    image[28..32].copy_from_slice(&pages.to_be_bytes());
-    image.copy_within(24..28, 92);
-    Ok(())
 }

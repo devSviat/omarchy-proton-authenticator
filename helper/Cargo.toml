@@ -17,7 +17,6 @@ path = "src/main.rs"
 [dependencies]
 hmac = "0.13.0"
 libc = "0.2.191"
-rusqlite = { version = "0.40.2", features = ["collation", "limits", "serialize"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 sha1 = "0.11.0"
@@ -31,4 +30,5 @@ codegen-units = 1
 strip = true
 
 [dev-dependencies]
+rusqlite = { version = "0.40.2", features = ["collation"] }
 tempfile = "3.27.0"

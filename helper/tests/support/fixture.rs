@@ -153,3 +153,12 @@ pub fn sqlite_records(dir: &Path) -> Vec<(i64, Vec<u8>)> {
         .map(|r| r.unwrap())
         .collect()
 }
+
+pub fn insert_raw(conn: &Connection, store: &str, key: &[u8], value: &[u8]) {
+    conn.execute(
+        "INSERT INTO Records (objectStoreID, key, value)
+         VALUES ((SELECT id FROM ObjectStoreInfo WHERE name = ?1), ?2, ?3)",
+        params![store, key, value],
+    )
+    .unwrap();
+}
