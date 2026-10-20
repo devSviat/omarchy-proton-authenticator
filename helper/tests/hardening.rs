@@ -36,26 +36,21 @@ fn harden_sets_flags() {
     assert!(!is_dumpable());
     assert_eq!(soft_limit("Max core file size"), Some(0));
     let locked = status_kb("VmLck:");
-    eprintln!(
-        "after harden: VmLck {locked} kB, VmRSS {} kB",
-        status_kb("VmRSS:")
-    );
-    assert!(locked > 0);
-    assert!(locked <= BUDGET_KB);
+    let figures = format!("VmLck {locked} kB, VmRSS {} kB", status_kb("VmRSS:"));
+    assert!(locked > 0, "{figures}");
+    assert!(locked <= BUDGET_KB, "{figures}");
 }
 
 fn main() {
-    match soft_limit("Max locked memory").map(|b| b / 1024) {
-        Some(kb) if kb < BUDGET_KB => {
+    if let Some(kb) = soft_limit("Max locked memory").map(|b| b / 1024) {
+        if kb < BUDGET_KB {
+            assert!(
+                std::env::var_os("CI").is_none(),
+                "RLIMIT_MEMLOCK is {kb} KiB (< {BUDGET_KB} KiB); CI must run with the shipped limit"
+            );
             eprintln!("hardening: skipped, RLIMIT_MEMLOCK is {kb} KiB (< {BUDGET_KB} KiB)");
             return;
         }
-        Some(kb) if kb > BUDGET_KB => eprintln!(
-            "hardening: RLIMIT_MEMLOCK is {kb} KiB; run under `ulimit -l {BUDGET_KB}` to \
-             check the shipped budget"
-        ),
-        None => eprintln!("hardening: RLIMIT_MEMLOCK is unlimited"),
-        Some(_) => {}
     }
     harden_sets_flags();
     eprintln!("test harden_sets_flags ... ok");

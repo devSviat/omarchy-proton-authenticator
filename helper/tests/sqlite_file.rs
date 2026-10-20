@@ -5,10 +5,11 @@ use std::path::Path;
 
 use pa_helper::error::ErrorCode;
 use pa_helper::sqlite_file::{Column, Image};
-use pa_helper::vault::{ProtonIdbVault, VaultSource};
+use pa_helper::vault::ProtonIdbVault;
 use pa_helper::wal::build_image;
 use rusqlite::Connection;
 use support::fixture::{self, db_path, shm_path, wal_path};
+use support::load::LoadAll;
 use tempfile::TempDir;
 
 type RecordRow = (i64, Vec<u8>, Vec<u8>, i64);

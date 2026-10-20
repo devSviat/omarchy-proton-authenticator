@@ -32,7 +32,16 @@ fn errno() -> Option<i32> {
 /// size exceeds `RLIMIT_MEMLOCK`; `Internal` for the other two calls.
 pub fn harden() -> Result<()> {
     // SAFETY: PR_SET_DUMPABLE takes one integer argument and touches no memory.
-    if unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0, 0, 0, 0) } != 0 {
+    if unsafe {
+        libc::prctl(
+            libc::PR_SET_DUMPABLE,
+            0 as libc::c_ulong,
+            0 as libc::c_ulong,
+            0 as libc::c_ulong,
+            0 as libc::c_ulong,
+        )
+    } != 0
+    {
         return Err(ErrorCode::Internal);
     }
     let no_core = libc::rlimit {
@@ -52,7 +61,15 @@ pub fn harden() -> Result<()> {
 
 pub fn is_dumpable() -> bool {
     // SAFETY: PR_GET_DUMPABLE takes no pointer arguments.
-    let dumpable = unsafe { libc::prctl(libc::PR_GET_DUMPABLE, 0, 0, 0, 0) };
+    let dumpable = unsafe {
+        libc::prctl(
+            libc::PR_GET_DUMPABLE,
+            0 as libc::c_ulong,
+            0 as libc::c_ulong,
+            0 as libc::c_ulong,
+            0 as libc::c_ulong,
+        )
+    };
     dumpable != 0
 }
 
@@ -85,8 +102,11 @@ pub fn close_stdout() -> Result<()> {
 ///
 /// The caller must not have reaped the group leader yet: once its pid is
 /// freed, the number could name an unrelated group.
+///
+/// Our own group is refused, so a stale or wrong id can never signal us.
 pub fn kill_process_group(pgid: i32, signal: Signal) -> Result<()> {
-    if pgid <= 1 {
+    // SAFETY: getpgrp has no arguments and cannot fail.
+    if pgid <= 1 || pgid == unsafe { libc::getpgrp() } {
         return Err(ErrorCode::Internal);
     }
     // SAFETY: kill takes plain integers; a negative pid addresses the group,

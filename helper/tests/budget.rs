@@ -142,6 +142,10 @@ fn kb_field(line: &str, name: &str) -> u64 {
 #[test]
 fn max_vault_fits_memlock_budget() {
     if memlock_hard_limit().is_some_and(|hard| hard < SHIPPED_MEMLOCK_BYTES) {
+        assert!(
+            std::env::var_os("CI").is_none(),
+            "hard RLIMIT_MEMLOCK is below 8 MiB; CI must allow the shipped limit"
+        );
         eprintln!("budget: skipped, hard RLIMIT_MEMLOCK is below 8 MiB");
         return;
     }

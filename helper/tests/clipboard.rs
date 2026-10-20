@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use pa_helper::clipboard::{Clipboard, WlCopy};
 use pa_helper::error::ErrorCode;
-use pa_helper::sys::process_group_exists;
+use pa_helper::sys::{kill_process_group, process_group_exists, Signal};
 use tempfile::TempDir;
 use zeroize::Zeroizing;
 
@@ -110,13 +110,42 @@ fn code_reaches_stdin_not_argv() {
     assert_eq!(fake.read("stdin").as_deref(), Some(CODE));
     let argv = fake.read("argv").unwrap();
     let args: Vec<&str> = argv.lines().skip(1).collect();
-    assert_eq!(args, ["--foreground", "--sensitive"]);
+    assert_eq!(
+        args,
+        ["--foreground", "--sensitive", "--type", "text/plain"]
+    );
     assert!(!args.iter().any(|a| a.chars().any(|c| c.is_ascii_digit())));
 }
 
 #[test]
 fn missing_program_is_dependency_missing() {
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
     let dir = tempfile::tempdir().unwrap();
     let r = hold(&dir.path().join("wl-copy"), Duration::from_millis(100));
     assert_eq!(r.unwrap_err(), ErrorCode::DependencyMissing);
+}
+
+#[test]
+fn overflowing_deadline_is_internal_before_spawning() {
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let fake = Fake::new(Mode::ExitAfter100ms);
+    assert_eq!(
+        hold(&fake.program, Duration::MAX).unwrap_err(),
+        ErrorCode::Internal
+    );
+    assert_eq!(fake.read("argv"), None);
+}
+
+fn own_process_group() -> i32 {
+    let stat = std::fs::read_to_string("/proc/self/stat").unwrap();
+    let after_comm = &stat[stat.rfind(')').unwrap() + 2..];
+    after_comm.split(' ').nth(2).unwrap().parse().unwrap()
+}
+
+#[test]
+fn own_process_group_is_never_signalled() {
+    assert_eq!(
+        kill_process_group(own_process_group(), Signal::Term).unwrap_err(),
+        ErrorCode::Internal
+    );
 }

@@ -6,9 +6,10 @@ use std::time::Duration;
 
 use pa_helper::error::ErrorCode;
 use pa_helper::ssv::{decode, get, Value};
-use pa_helper::vault::{read_stable, ProtonIdbVault, VaultSource};
+use pa_helper::vault::{read_stable, ProtonIdbVault};
 use pa_helper::wal::{apply_wal, Applied};
 use support::fixture::{self, db_path, shm_path, wal_path};
+use support::load::LoadAll;
 use support::wal_writer;
 use tempfile::TempDir;
 use zeroize::Zeroizing;

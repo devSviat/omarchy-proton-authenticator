@@ -21,12 +21,19 @@ pub trait Clipboard {
     fn hold(&self, code: Zeroizing<String>, clear_after: Duration) -> Result<()>;
 }
 
-/// Holds the selection with `wl-copy --foreground --sensitive`.
+/// Holds the selection with `wl-copy --foreground --sensitive --type text/plain`.
 ///
 /// The child process owning the selection is the only ownership signal: it
 /// exits as soon as another client copies something. So deciding whether to
 /// clear never needs the code again, and no copy or hash of it outlives the
 /// write to the child's stdin.
+///
+/// The explicit MIME type stops wl-copy from inferring one by running
+/// xdg-mime on a temporary copy of the code. wl-copy may still buffer the
+/// data in a tmpfs file of its own, which is outside this process's control.
+///
+/// A copy made by another client within milliseconds of the deadline can race
+/// the ownership check and be cleared.
 pub struct WlCopy {
     program: PathBuf,
 }
@@ -41,6 +48,14 @@ impl WlCopy {
             (0, _) => Ok(()),
             _ => Err(ErrorCode::Internal),
         }
+    }
+
+    /// The code may already be on the clipboard when holding fails, so the
+    /// selection is cleared even though it might belong to someone else by now.
+    fn abort(&self, child: &mut Child, e: ErrorCode) -> ErrorCode {
+        kill_and_reap(child);
+        let _ = self.clear();
+        e
     }
 }
 
@@ -71,44 +86,40 @@ fn wait_exit(pgid: i32, deadline: Instant) -> Result<bool> {
 
 impl Clipboard for WlCopy {
     fn hold(&self, code: Zeroizing<String>, clear_after: Duration) -> Result<()> {
-        let deadline = Instant::now() + clear_after;
+        let deadline = Instant::now()
+            .checked_add(clear_after)
+            .ok_or(ErrorCode::Internal)?;
         let mut child = scrubbed_command(&self.program)
-            .args(["--foreground", "--sensitive"])
+            .args(["--foreground", "--sensitive", "--type", "text/plain"])
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
             .map_err(|e| spawn_error(&e))?;
 
-        let pgid = match feed(&mut child, code).and_then(|()| child_pgid(&child)) {
-            Ok(pgid) => pgid,
-            Err(e) => {
-                kill_and_reap(&mut child);
-                return Err(e);
+        let held = feed(&mut child, code)
+            .and_then(|()| child_pgid(&child))
+            .and_then(|pgid| Ok((pgid, wait_exit(pgid, deadline)?)));
+        let pgid = match held {
+            Ok((_, true)) => {
+                child.wait().map_err(|_| ErrorCode::Internal)?;
+                return Ok(());
             }
+            Ok((pgid, false)) => pgid,
+            Err(e) => return Err(self.abort(&mut child, e)),
         };
-
-        let owner_gone = match wait_exit(pgid, deadline) {
-            Ok(gone) => gone,
-            Err(e) => {
-                kill_and_reap(&mut child);
-                return Err(e);
-            }
-        };
-        if owner_gone {
-            child.wait().map_err(|_| ErrorCode::Internal)?;
-            return Ok(());
-        }
 
         let terminated = sys::kill_process_group(pgid, Signal::Term)
             .and_then(|()| wait_exit(pgid, Instant::now() + TERM_GRACE))
             .unwrap_or(false);
-        if terminated {
+        let reaped = if terminated {
             let _ = sys::kill_process_group(pgid, Signal::Kill);
-            child.wait().map_err(|_| ErrorCode::Internal)?;
+            child.wait().map(drop).map_err(|_| ErrorCode::Internal)
         } else {
             kill_and_reap(&mut child);
-        }
-        self.clear()
+            Ok(())
+        };
+        let cleared = self.clear();
+        reaped.and(cleared)
     }
 }

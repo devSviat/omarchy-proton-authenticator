@@ -9,6 +9,7 @@ use pa_helper::error::ErrorCode;
 use pa_helper::ssv::Value;
 use pa_helper::vault::{ProtonIdbVault, VaultSource};
 use support::fixture::{self, db_path, write_decoy, write_vault, write_vault_wal};
+use support::load::LoadAll;
 use tempfile::TempDir;
 use zeroize::Zeroizing;
 

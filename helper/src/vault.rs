@@ -72,18 +72,6 @@ pub trait Snapshot {
 pub trait VaultSource {
     fn modified(&self) -> Result<u64>;
     fn snapshot(&self) -> Result<Box<dyn Snapshot>>;
-
-    /// Collects the whole snapshot; the codes path streams it instead.
-    fn load(&self) -> Result<(StorageKeyRef, Vec<EncryptedItem>)> {
-        let snapshot = self.snapshot()?;
-        let key_ref = snapshot.key_ref()?;
-        let mut items = Vec::new();
-        snapshot.for_each_item(&mut |item| {
-            items.push(item);
-            Ok(())
-        })?;
-        Ok((key_ref, items))
-    }
 }
 
 pub struct ProtonIdbVault {
