@@ -1,6 +1,10 @@
 # Proton Authenticator for Omarchy
 
-![The panel in demo mode](preview.png)
+![The panel in demo mode on the default Tokyo Night theme](preview.png)
+
+The panel follows the active Omarchy theme; here it is on a dark custom theme:
+
+![The panel in demo mode on a dark custom theme](docs/screenshots/abstract-black.png)
 
 Your [Proton Authenticator](https://proton.me/authenticator) 2FA codes in a keyboard-driven
 panel on the Omarchy bar: press a hotkey, type a few letters, press Enter, and the code is
