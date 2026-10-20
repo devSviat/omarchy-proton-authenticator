@@ -187,7 +187,7 @@ Item {
           if (Model.sameRequest(wanted, req) && root.queuedRequest === null)
             root.queuedRequest = Model.codesRequest(true, "")
         } else {
-          // Labels stay after a keyring or reveal failure, so the list does
+          // Labels stay after a keyring or item-level failure, so the list does
           // not empty and move the selection, which would start another reveal.
           root.entries = Model.keepsLabels(reply.error) ? Model.hideCodes(root.entries, "") : []
           root.codesError = reply.error

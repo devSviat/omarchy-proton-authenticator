@@ -111,6 +111,8 @@ Panel {
     root.feedbackId = ""
     root.feedbackText = ""
     feedbackTimer.stop()
+    root.actionFeedback = ""
+    actionFeedbackTimer.stop()
     revealDebounce.stop()
     refreshTimer.stop()
     root.clockMs = Date.now()
@@ -264,7 +266,12 @@ Panel {
     onTriggered: root.actionFeedback = ""
   }
 
-  onSearchShownChanged: if (!root.searchShown) root.query = ""
+  function clearSearch() {
+    root.query = ""
+    searchField.text = ""
+  }
+
+  onSearchShownChanged: if (!root.searchShown) root.clearSearch()
 
   function activate() {
     root.selectedByPointer = false
@@ -374,7 +381,10 @@ Panel {
         font.family: root.fontFamily
         text: root.query
         countText: Model.searchCount(root.query, root.entries.length, root.filtered.length)
-        onTextEdited: root.query = root.searchShown ? text : ""
+        onTextEdited: {
+          if (root.searchShown) root.query = text
+          else root.clearSearch()
+        }
         onMoveRequested: function(delta) { root.move(delta) }
         onPageRequested: function(direction) { root.move(direction * 5) }
         onActivateRequested: root.activate()
