@@ -409,6 +409,7 @@ fn prefs_set_rejects_bad_input() {
     let cases: &[&[u8]] = &[
         br#"{"pinned":["../x"],"recent":[],"privacy":false}"#,
         br#"{"pinned":[],"recent":[""],"privacy":false}"#,
+        br#"{"pinned":["-x"],"recent":[],"privacy":false}"#,
         br#"{"pinned":[],"recent":[],"privacy":"yes"}"#,
         br#"{"pinned":[],"recent":[],"privacy":false,"extra":1}"#,
         br#"{"pinned":[],"recent":[]}"#,

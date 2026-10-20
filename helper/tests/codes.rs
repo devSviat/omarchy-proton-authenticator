@@ -424,7 +424,16 @@ fn empty_vault_returns_nothing_without_touching_keys() {
 #[test]
 fn invalid_item_id_is_format_changed() {
     let long = "a".repeat(129);
-    for id in ["", "has space", "a/b", "semi;colon", "ü", long.as_str()] {
+    for id in [
+        "",
+        "has space",
+        "a/b",
+        "semi;colon",
+        "ü",
+        "-lead",
+        "--demo",
+        long.as_str(),
+    ] {
         let tmp = TempDir::new().unwrap();
         let vault = vault_with(
             tmp.path(),
@@ -445,7 +454,7 @@ fn item_id_charset_and_length_accepted() {
     let vault = vault_with(
         tmp.path(),
         &key_ref(Some("a"), &SALT, 0),
-        &[totp_item("-A.b:c_d", "A", "x"), totp_item(&max, "B", "x")],
+        &[totp_item("A.b:c_d-", "A", "x"), totp_item(&max, "B", "x")],
     );
     let keys = FakeKeys::new(LockState::Unlocked);
     assert_eq!(codes(&vault, &keys, &req(None, false)).unwrap().len(), 2);

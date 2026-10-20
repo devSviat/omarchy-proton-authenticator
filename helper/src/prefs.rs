@@ -231,7 +231,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         fs::write(
             tmp.path().join(FILE_NAME),
-            r#"{"pinned":["ok","../bad"],"recent":["r","r"],"privacy":true}"#,
+            r#"{"pinned":["ok","../bad","-flag"],"recent":["r","r","--demo"],"privacy":true}"#,
         )
         .unwrap();
         let prefs = load(tmp.path()).unwrap();
@@ -256,5 +256,14 @@ mod tests {
             .unwrap();
         assert!(status.success());
         assert_eq!(load(tmp.path()).unwrap_err(), ErrorCode::Internal);
+    }
+
+    #[test]
+    fn input_with_a_flag_like_id_is_rejected() {
+        let input = br#"{"pinned":["--demo"],"recent":[],"privacy":false}"#;
+        assert_eq!(
+            Prefs::from_input(input).unwrap_err(),
+            ErrorCode::InvalidArgument
+        );
     }
 }

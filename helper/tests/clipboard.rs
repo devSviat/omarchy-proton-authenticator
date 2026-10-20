@@ -149,3 +149,22 @@ fn own_process_group_is_never_signalled() {
         ErrorCode::Internal
     );
 }
+
+#[test]
+fn dropped_hold_kills_owner_and_clears() {
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let fake = Fake::new(Mode::Hold);
+    let hold = WlCopy::new(fake.program.clone())
+        .start(Zeroizing::new(CODE.to_string()), Duration::from_secs(30))
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while fake.read("pid").is_none() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let pgid = fake.pid();
+    let start = Instant::now();
+    drop(hold);
+    assert!(start.elapsed() < Duration::from_secs(2));
+    assert_eq!(fake.read("clear").as_deref(), Some("clear\n"));
+    assert!(wait_group_gone(pgid), "fake wl-copy group still alive");
+}

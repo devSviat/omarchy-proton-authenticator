@@ -97,15 +97,27 @@ struct WlCopyHold {
     child: Child,
     pgid: i32,
     deadline: Instant,
+    settled: bool,
 }
 
 impl WlCopyHold {
     /// The code may already be on the clipboard when holding fails, so the
     /// selection is cleared even though it might belong to someone else by now.
-    fn fail(mut self, e: ErrorCode) -> ErrorCode {
+    fn fail(&mut self, e: ErrorCode) -> ErrorCode {
+        self.settled = true;
         kill_and_reap(&mut self.child);
         let _ = clear(&self.program);
         e
+    }
+}
+
+/// A hold dropped without `wait_and_clear` or `abort` (an early return or a
+/// future caller's mistake) must not leave the code on the clipboard.
+impl Drop for WlCopyHold {
+    fn drop(&mut self) {
+        if !self.settled {
+            self.fail(ErrorCode::Internal);
+        }
     }
 }
 
@@ -133,6 +145,7 @@ impl Clipboard for WlCopy {
             child,
             pgid,
             deadline,
+            settled: false,
         };
         match feed(&mut hold.child, code) {
             Ok(()) => Ok(Box::new(hold)),
@@ -143,6 +156,7 @@ impl Clipboard for WlCopy {
 
 impl Hold for WlCopyHold {
     fn wait_and_clear(mut self: Box<Self>) -> Result<()> {
+        self.settled = true;
         match wait_exit(self.pgid, self.deadline) {
             Ok(true) => return reap(&mut self.child).map(drop),
             Ok(false) => {}
@@ -162,7 +176,7 @@ impl Hold for WlCopyHold {
         reaped.and(cleared)
     }
 
-    fn abort(self: Box<Self>) {
-        let _ = self.fail(ErrorCode::Internal);
+    fn abort(mut self: Box<Self>) {
+        self.fail(ErrorCode::Internal);
     }
 }

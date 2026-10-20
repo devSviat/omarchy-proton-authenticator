@@ -3,7 +3,7 @@ use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Mutex, MutexGuard, TryLockError};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -107,15 +107,37 @@ pub(crate) fn kill_and_reap(child: &mut Child) {
     let _ = child.wait();
 }
 
+/// How long the watchdog waits for the group lock. The main thread holds it
+/// only around `spawn` and around reaping a child that has already exited or
+/// been SIGKILLed, but a child stuck in uninterruptible sleep could stall
+/// either, and a timeout must still end the process.
+const KILL_LOCK_PATIENCE: Duration = Duration::from_millis(200);
+const KILL_LOCK_STEP: Duration = Duration::from_millis(10);
+
 /// SIGKILLs every group recorded by [`spawn_tracked`] and returns the lock, so
 /// no child can be spawned or reaped until the caller drops it. Meant for a
-/// caller that is about to end the process.
-pub fn kill_active_groups() -> MutexGuard<'static, Vec<i32>> {
-    let groups = active_groups();
+/// caller that is about to end the process. Returns `None`, killing nothing,
+/// if the lock stays busy for the whole wait.
+pub fn kill_active_groups() -> Option<MutexGuard<'static, Vec<i32>>> {
+    kill_active_groups_within(KILL_LOCK_PATIENCE)
+}
+
+fn kill_active_groups_within(patience: Duration) -> Option<MutexGuard<'static, Vec<i32>>> {
+    let deadline = Instant::now() + patience;
+    let groups = loop {
+        match ACTIVE_GROUPS.try_lock() {
+            Ok(groups) => break groups,
+            Err(TryLockError::Poisoned(e)) => break e.into_inner(),
+            Err(TryLockError::WouldBlock) if Instant::now() < deadline => {
+                thread::sleep(KILL_LOCK_STEP);
+            }
+            Err(TryLockError::WouldBlock) => return None,
+        }
+    };
     for pgid in groups.iter() {
         let _ = sys::kill_process_group(*pgid, Signal::Kill);
     }
-    groups
+    Some(groups)
 }
 
 /// Runs `program` by absolute path with a scrubbed environment and returns
@@ -242,6 +264,21 @@ fn read_capped(mut source: impl Read, max_out: usize) -> Captured {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn kill_active_groups_gives_up_on_a_held_lock() {
+        let held = active_groups();
+        let start = Instant::now();
+        let outcome =
+            thread::spawn(|| kill_active_groups_within(Duration::from_millis(100)).is_some())
+                .join()
+                .unwrap();
+        let waited = start.elapsed();
+        drop(held);
+        assert!(!outcome);
+        assert!(waited >= Duration::from_millis(100), "{waited:?}");
+        assert!(waited < Duration::from_secs(1), "{waited:?}");
+    }
 
     const TIMEOUT: Duration = Duration::from_secs(5);
 

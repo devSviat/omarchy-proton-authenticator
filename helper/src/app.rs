@@ -50,9 +50,11 @@ fn valid_key_id(id: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b':' | b'-'))
 }
 
-/// Matches `^[A-Za-z0-9._:-]{1,128}$`.
+/// Matches `^[A-Za-z0-9._:-]{1,128}$` without a leading `-`, so an id can
+/// never be mistaken for a command-line flag.
 pub fn valid_item_id(id: &str) -> bool {
     (1..=ITEM_ID_MAX_LEN).contains(&id.len())
+        && !id.starts_with('-')
         && id
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b':' | b'-'))

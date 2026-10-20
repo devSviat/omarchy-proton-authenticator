@@ -111,10 +111,10 @@ fn set_once(flag: &mut bool) -> Result<()> {
     Ok(())
 }
 
-/// Ids that start with `-` are refused so a flag can never be taken for an id.
+/// [`valid_item_id`] refuses a leading `-`, so a flag is never taken for an id.
 fn item_id(arg: Option<&str>) -> Result<String> {
     match arg {
-        Some(id) if valid_item_id(id) && !id.starts_with('-') => Ok(id.to_owned()),
+        Some(id) if valid_item_id(id) => Ok(id.to_owned()),
         _ => Err(ErrorCode::InvalidArgument),
     }
 }
@@ -274,7 +274,8 @@ pub fn emit(line: &str) {
 
 /// The watchdog's action: kill the running child's process group, report
 /// `TIMEOUT` and end the process. The guard keeps any other child from being
-/// spawned until the process is gone.
+/// spawned until the process is gone; if the lock stays busy, the process
+/// ends without the kill rather than hang.
 pub fn time_out() {
     let _frozen = proc::kill_active_groups();
     emit(&render_err(ErrorCode::Timeout));
