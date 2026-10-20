@@ -193,6 +193,7 @@ say what is wrong.
 
 Priorities, in order: security, reliability, UX, UI. The design and threat model are in
 [the spec](docs/superpowers/specs/2026-10-20-proton-authenticator-plugin-design.md).
+To report a vulnerability, see [SECURITY.md](SECURITY.md).
 
 ### What it protects
 
