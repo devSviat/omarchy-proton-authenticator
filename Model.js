@@ -490,3 +490,135 @@ var KEYRING_ERRORS = ["KEYRING_LOCKED", "KEYRING_UNAVAILABLE", "KEY_NOT_FOUND"]
 function keepsLabels(error, request) {
   return KEYRING_ERRORS.indexOf(error) >= 0 || (!!request && request.revealId !== "")
 }
+
+// Brand glyphs from the Nerd Font the bar already uses, so issuer icons need
+// no files and no network. Every codepoint was checked against the installed
+// JetBrainsMono Nerd Font; keys are issuers as normalized by issuerKeys().
+var ISSUER_GLYPHS = Object.create(null)
+
+function brand(glyph, names) {
+  names.forEach(function(name) { ISSUER_GLYPHS[name] = glyph })
+}
+
+brand("\uF09B", ["github"])
+brand("\uF296", ["gitlab"])
+brand("\uF171", ["bitbucket"])
+brand("\uF339", ["gitea"])
+brand("\uF330", ["codeberg"])
+brand("\uF1A0", ["google", "gmail", "googleworkspace", "gsuite", "googlecloud"])
+brand("\u{F05C3}", ["youtube"])
+brand("\uED04", ["microsoft", "microsoftaccount", "microsoft365", "office365", "outlook", "live", "hotmail"])
+brand("\uE754", ["azure", "microsoftazure"])
+brand("\uED3E", ["xbox"])
+brand("\uF179", ["apple", "appleid", "icloud"])
+brand("\uF270", ["amazon"])
+brand("\uF0EF", ["aws", "amazonwebservices"])
+brand("\uE792", ["cloudflare"])
+brand("\uF1EF", ["digitalocean"])
+brand("\uF2B8", ["linode"])
+brand("\uE8D3", ["vercel"])
+brand("\uE83C", ["netlify"])
+brand("\uE77B", ["heroku"])
+brand("\uF21F", ["docker", "dockerhub"])
+brand("\uED0E", ["npm", "npmjs"])
+brand("\uE878", ["pypi"])
+brand("\uE8B6", ["supabase"])
+brand("\uE7A4", ["mongodb", "mongodbatlas"])
+brand("\uE89F", ["sentry"])
+brand("\uE902", ["datadog"])
+brand("\uE7F3", ["grafana"])
+brand("\uE850", ["okta"])
+brand("\uE808", ["jetbrains"])
+brand("\uF1FF", ["discord"])
+brand("\uF198", ["slack"])
+brand("\uF2C6", ["telegram"])
+brand("\uF232", ["whatsapp"])
+brand("\uF17E", ["skype"])
+brand("\uF1A1", ["reddit"])
+brand("\uF09A", ["facebook"])
+brand("\uF16D", ["instagram"])
+brand("\uF0E1", ["linkedin"])
+brand("\uF099", ["twitter", "x"])
+brand("\uEDC0", ["mastodon"])
+brand("\uF1E8", ["twitch"])
+brand("\uF1B6", ["steam"])
+brand("\uED18", ["playstation", "psn", "playstationnetwork"])
+brand("\u{F07E1}", ["nintendo"])
+brand("\uEF94", ["battlenet", "blizzard"])
+brand("\u{F0BDA}", ["ubisoft"])
+brand("\u{F0BA1}", ["gog"])
+brand("\u{F0744}", ["humblebundle"])
+brand("\uEF99", ["itchio"])
+brand("\uF1ED", ["paypal"])
+brand("\uED53", ["stripe"])
+brand("\uEDBE", ["ebay"])
+brand("\uF2D7", ["etsy"])
+brand("\uF2F3", ["kickstarter"])
+brand("\uED13", ["patreon"])
+brand("\uF16B", ["dropbox"])
+brand("\uEF98", ["evernote"])
+brand("\uF181", ["trello"])
+brand("\uEF32", ["atlassian"])
+brand("\uEF56", ["jira"])
+brand("\uEF3F", ["confluence"])
+brand("\uEF47", ["figma"])
+brand("\uE848", ["notion"])
+brand("\uEC81", ["openai", "chatgpt"])
+brand("\uE786", ["mozilla"])
+brand("\uF269", ["firefox"])
+brand("\uF19A", ["wordpress"])
+brand("\uF19E", ["yahoo"])
+brand("\uF1BC", ["spotify"])
+brand("\uEF93", ["airbnb"])
+brand("\uED31", ["uber"])
+brand("\uF2FD", ["lyft"])
+brand("\uEF9A", ["salesforce"])
+brand("\uF2E8", ["hubspot"])
+brand("\uEE67", ["mailchimp"])
+brand("\uEEA6", ["kaggle"])
+brand("\uF16C", ["stackoverflow", "stackexchange"])
+brand("\u{F0446}", ["lastpass"])
+brand("\u{F0881}", ["1password", "onepassword"])
+brand("\uEF72", ["ubuntu", "ubuntuone"])
+brand("\uEF5D", ["redhat"])
+brand("\uEF46", ["fedora"])
+brand("\uEDBF", ["keybase"])
+brand("\uED39", ["vimeo"])
+brand("\uF1BE", ["soundcloud"])
+brand("\uF2C4", ["quora"])
+brand("\uF0D2", ["pinterest"])
+brand("\uF2AB", ["snapchat"])
+brand("\uF173", ["tumblr"])
+brand("\uF23A", ["medium"])
+brand("\uF266", ["wikipedia"])
+brand("\uF1B4", ["behance"])
+brand("\uF17D", ["dribbble"])
+brand("\uF1BD", ["deviantart"])
+brand("\uF288", ["producthunt"])
+brand("\uF189", ["vk"])
+brand("\u{F0611}", ["wechat"])
+
+// "Git Hub", "github.com" and "accounts.google.com" become "github" and
+// "google"; a parenthetical like "(work)" is dropped. The first word is a
+// fallback key, so "Microsoft Account" still finds Microsoft.
+function issuerKeys(issuer) {
+  var s = lower(issuer).replace(/\([^)]*\)/g, " ").trim()
+  if (/^[a-z0-9-]+(\.[a-z0-9-]+)+$/.test(s)) {
+    var labels = s.split(".")
+    s = labels[labels.length - 2]
+  }
+  var words = s.split(/[^a-z0-9]+/).filter(function(w) { return w !== "" })
+  var keys = []
+  if (words.length > 0) keys.push(words.join(""))
+  if (words.length > 1) keys.push(words[0])
+  return keys
+}
+
+function issuerGlyph(issuer) {
+  var keys = issuerKeys(issuer)
+  for (var i = 0; i < keys.length; i++) {
+    var glyph = ISSUER_GLYPHS[keys[i]]
+    if (typeof glyph === "string") return glyph
+  }
+  return ""
+}

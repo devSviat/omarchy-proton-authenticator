@@ -45,14 +45,16 @@ CursorSurface {
     color: Style.normalFillFor(root.foreground, root.foreground)
     borderSpec: Border.controlSpec("normal", root.foreground, root.foreground)
 
+    // fontFamily is the bar's Nerd Font, which carries the brand glyphs.
     Text {
+      readonly property string glyph: Model.issuerGlyph(root.entry.issuer)
       anchors.centerIn: parent
       textFormat: Text.PlainText
-      text: Model.initial(root.entry)
+      text: glyph !== "" ? glyph : Model.initial(root.entry)
       color: root.foreground
       font.family: root.fontFamily
-      font.pixelSize: Style.font.body
-      font.bold: true
+      font.pixelSize: glyph !== "" ? Style.font.iconLarge : Style.font.body
+      font.bold: glyph === ""
     }
   }
 

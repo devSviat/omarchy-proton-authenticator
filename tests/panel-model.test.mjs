@@ -214,3 +214,28 @@ test("keepsLabels after keyring or reveal failures only", () => {
   assert.equal(M.keepsLabels("VAULT_FORMAT_CHANGED", M.codesRequest(true, "")), false)
   assert.equal(M.keepsLabels("HELPER_MISSING", M.codesRequest(false, "")), false)
 })
+
+test("issuerGlyph normalizes case, spacing, punctuation and domains", () => {
+  const gh = M.issuerGlyph("GitHub")
+  assert.notEqual(gh, "")
+  for (const name of ["github", "github.com", "Git Hub", "GITHUB", "GitHub (work)", "www.github.com", "Git-Hub"])
+    assert.equal(M.issuerGlyph(name), gh, name)
+  assert.equal(M.issuerGlyph("accounts.google.com"), M.issuerGlyph("Google"))
+})
+
+test("issuerGlyph maps aliases to one glyph", () => {
+  assert.equal(M.issuerGlyph("Gmail"), M.issuerGlyph("Google"))
+  assert.equal(M.issuerGlyph("Google Workspace"), M.issuerGlyph("Google"))
+  assert.equal(M.issuerGlyph("Amazon Web Services"), M.issuerGlyph("AWS"))
+  assert.notEqual(M.issuerGlyph("AWS"), M.issuerGlyph("Amazon"))
+  assert.equal(M.issuerGlyph("X"), M.issuerGlyph("Twitter"))
+  assert.equal(M.issuerGlyph("x.com"), M.issuerGlyph("Twitter"))
+  assert.equal(M.issuerGlyph("Microsoft Account"), M.issuerGlyph("Microsoft"))
+  assert.equal(M.issuerGlyph("ChatGPT"), M.issuerGlyph("OpenAI"))
+})
+
+test("issuerGlyph returns empty for unknown and prototype-like issuers", () => {
+  for (const name of ["Hetzner", "Tailscale", "Proton", "", null, undefined, "constructor", "__proto__", "toString", "hasOwnProperty"])
+    assert.equal(M.issuerGlyph(name), "", String(name))
+  assert.equal(M.issuerGlyph("Gitea (home) server"), M.issuerGlyph("gitea"))
+})
