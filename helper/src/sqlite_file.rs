@@ -211,7 +211,7 @@ impl<'a> Image<'a> {
         if be32(data, 56)? != ENCODING_UTF8 {
             return bad();
         }
-        if data.len() % page_size != 0 {
+        if !data.len().is_multiple_of(page_size) {
             return bad();
         }
         Ok(Self {

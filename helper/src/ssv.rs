@@ -199,8 +199,10 @@ impl<'a> Reader<'a> {
             }
             let raw = self.take(byte_len)?;
             let units = raw
-                .chunks_exact(2)
-                .map(|c| u16::from_le_bytes([c[0], c[1]]));
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|c| u16::from_le_bytes(*c));
             match char::decode_utf16(units).collect::<std::result::Result<String, _>>() {
                 Ok(s) => s,
                 Err(_) => return bad(),

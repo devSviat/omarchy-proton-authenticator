@@ -176,7 +176,9 @@ fn g_stale_salt_frames_after_wal_restart_are_ignored() {
     let frames = (bytes.len() - 32) / (24 + 4096);
     let valid_salts = wal_writer::salts(&bytes);
     let stale = bytes[32..]
-        .chunks_exact(24 + 4096)
+        .as_chunks::<{ 24 + 4096 }>()
+        .0
+        .iter()
         .filter(|f| u32::from_be_bytes(f[8..12].try_into().unwrap()) != valid_salts.0)
         .count();
     assert!(

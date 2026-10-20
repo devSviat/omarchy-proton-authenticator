@@ -17,7 +17,7 @@ fn word(be: bool, b: &[u8]) -> u32 {
 
 pub fn checksum(be: bool, seed: (u32, u32), data: &[u8]) -> (u32, u32) {
     let (mut s0, mut s1) = seed;
-    for c in data.chunks_exact(8) {
+    for c in data.as_chunks::<8>().0 {
         s0 = s0.wrapping_add(word(be, &c[0..4])).wrapping_add(s1);
         s1 = s1.wrapping_add(word(be, &c[4..8])).wrapping_add(s0);
     }

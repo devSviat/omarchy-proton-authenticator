@@ -309,7 +309,7 @@ fn fuzz_truncations_and_mutations_never_panic() {
             let at = (rng.next() % blob.len() as u64) as usize;
             blob[at] = rng.next() as u8;
         }
-        if rng.next() % 4 == 0 {
+        if rng.next().is_multiple_of(4) {
             let keep = (rng.next() % blob.len() as u64) as usize;
             blob.truncate(keep);
         }
