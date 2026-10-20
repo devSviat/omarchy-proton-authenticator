@@ -68,8 +68,9 @@ fn active_groups() -> MutexGuard<'static, Vec<i32>> {
     ACTIVE_GROUPS.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// Spawns `command` (built by [`scrubbed_command`], so the child leads its own
-/// group) and records its group for [`kill_active_groups`].
+/// Spawns `command` and records its group for [`kill_active_groups`]. The
+/// child must lead its own group: build `command` with [`scrubbed_command`],
+/// or with [`scrubbed_env_command`] plus `sys::new_session_on_spawn`.
 pub(crate) fn spawn_tracked(command: &mut Command) -> Result<Child> {
     let mut groups = active_groups();
     let child = command.spawn().map_err(|e| spawn_error(&e))?;
