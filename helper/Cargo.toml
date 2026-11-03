@@ -42,7 +42,7 @@ codegen-units = 1
 strip = true
 
 [dev-dependencies]
-rusqlite = { version = "0.40.2", features = ["collation"] }
+rusqlite = { version = "0.41.1", features = ["collation"] }
 tempfile = "3.27.0"
 
 [[test]]
