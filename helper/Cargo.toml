@@ -1,6 +1,6 @@
 [package]
 name = "pa-helper"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 rust-version = "1.89"
 publish = false
@@ -32,8 +32,8 @@ libc = "0.2.191"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 sha1 = { version = "0.11.0", features = ["zeroize"] }
-sha2 = { version = "0.11.0", features = ["zeroize"] }
-zeroize = { version = "1.9.1", features = ["serde"] }
+sha2 = { version = "0.11.2", features = ["zeroize"] }
+zeroize = { version = "1.9.2", features = ["serde"] }
 
 [profile.release]
 panic = "abort"
@@ -42,7 +42,7 @@ codegen-units = 1
 strip = true
 
 [dev-dependencies]
-rusqlite = { version = "0.40.2", features = ["collation"] }
+rusqlite = { version = "0.43.0", features = ["collation"] }
 tempfile = "3.27.0"
 
 [[test]]
