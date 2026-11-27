@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.1 — 2026-11-27
+
+- Works with Omarchy 4.5 on Qt 6.12: the palette is read as `Commons.Color`.
+- Dependencies: sha2 0.11.2, zeroize 1.9.2, rusqlite 0.43.0 (tests only), refreshed lockfile.
+- CI: Rust 1.100.0, cargo-deny-action 2.1.4, actions/checkout 7.0.1, actions/setup-node 7.1.0.
+
 ## 0.1.0 — 2026-10-20
 
 First release.

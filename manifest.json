@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "sviat.proton-authenticator",
   "name": "Proton Authenticator",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "author": "devSviat",
   "license": "MIT",
   "description": "Your Proton Authenticator 2FA codes in a keyboard-driven bar panel. Reads the local vault read-only; secrets never leave a small hardened helper.",
