@@ -127,7 +127,14 @@ fn version_reply() {
         return;
     }
     let out = Sandbox::new().run(&["version"]);
-    assert_eq!(line(&out), r#"{"ok":true,"protocol":1,"version":"0.1.0"}"#);
+    assert_eq!(
+        line(&out),
+        concat!(
+            r#"{"ok":true,"protocol":1,"version":""#,
+            env!("CARGO_PKG_VERSION"),
+            r#""}"#
+        )
+    );
     assert!(out.status.success());
 }
 
